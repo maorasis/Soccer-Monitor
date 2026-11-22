@@ -1,4 +1,13 @@
+"""Telegram control panel shared by the websocket and live-Under daemons.
+
+Handlers use module-level objects initialized by start_bot_polling. Under-specific
+menus are enabled by RuntimeConfig.under_totals; edits use aiogram conversation
+state and authorization is enforced on both messages and callback queries.
+"""
+
 import logging
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from decimal import Decimal, InvalidOperation
 from typing import Optional, Any, Callable, Awaitable
 
@@ -25,6 +34,8 @@ config: RuntimeConfig = None
 # this module, so importing ApiHealth from it here would be circular.
 health: Any = None
 allowed_chat_id: Optional[int] = None
+market_snapshot: Any = None
+test_sender: Any = None
 
 # Price thresholds on Polymarket are between 0 and 1
 THRESHOLD_MIN = 0.01
@@ -53,17 +64,37 @@ class AuthMiddleware(BaseMiddleware):
 
 
 class BotStates(StatesGroup):
+    """Input awaited after an authorized user selects a menu action."""
     waiting_for_global_threshold = State()
     waiting_for_league_threshold = State()
     waiting_for_under_threshold = State()
+    waiting_for_schedule = State()
 
 def get_main_menu_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
+    buttons = [
         [InlineKeyboardButton(text="📊 Status", callback_data="menu_status")],
         [InlineKeyboardButton(text="⚙️ Edit Thresholds", callback_data="menu_thresholds")],
         [InlineKeyboardButton(text="🏆 Manage Leagues", callback_data="menu_leagues")],
-        [InlineKeyboardButton(text="❌ Close", callback_data="menu_close")]
-    ])
+    ]
+    if config and config.under_totals:
+        buttons.extend([
+            [InlineKeyboardButton(text="📋 View Thresholds", callback_data="view_thresholds:0")],
+            [InlineKeyboardButton(text="⚽ Live Markets", callback_data="live_markets:0")],
+            [InlineKeyboardButton(text="🕒 Monitoring Schedule", callback_data="menu_schedule")],
+            [InlineKeyboardButton(text="🔔 Send Test Notification", callback_data="test_notification")],
+        ])
+    buttons.append([InlineKeyboardButton(text="❌ Close", callback_data="menu_close")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def paged_kb(prefix, page, count, page_size):
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="⬅️ Previous", callback_data=f"{prefix}:{page - 1}"))
+    if (page + 1) * page_size < count:
+        nav.append(InlineKeyboardButton(text="Next ➡️", callback_data=f"{prefix}:{page + 1}"))
+    buttons = [nav] if nav else []
+    buttons.append([InlineKeyboardButton(text="🏠 Main menu", callback_data="menu_main")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def get_thresholds_menu_kb():
     if config.under_totals:
@@ -71,6 +102,7 @@ def get_thresholds_menu_kb():
             [InlineKeyboardButton(text=f"{data['flag']} {league}", callback_data=f"under_league:{league}")]
             for league, data in SUPPORTED_LEAGUES.items()
         ]
+        buttons.append([InlineKeyboardButton(text="🌍 All leagues", callback_data="under_all")])
         buttons.append([InlineKeyboardButton(text="⬅️ Back", callback_data="menu_main")])
         return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -101,6 +133,12 @@ def get_under_lines_kb(league: str):
         )]
         for line in UNDER_DEFAULT_THRESHOLDS
     ]
+    buttons.append([InlineKeyboardButton(text="⬅️ Leagues", callback_data="menu_thresholds")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def get_under_all_lines_kb():
+    buttons = [[InlineKeyboardButton(text=f"Under {line}", callback_data=f"under_all_edit:{line}")]
+               for line in UNDER_DEFAULT_THRESHOLDS]
     buttons.append([InlineKeyboardButton(text="⬅️ Leagues", callback_data="menu_thresholds")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -155,8 +193,8 @@ async def cb_menu_status(callback: CallbackQuery):
     if config.under_totals:
         defaults = ", ".join(f"Under {line}: {price * 100:g}¢" for line, price in UNDER_DEFAULT_THRESHOLDS.items())
         overrides = sum(len(prices) for prices in config.under_thresholds.values())
-        hours = f"{UNDER_ACTIVE_START_HOUR:02d}:00–{UNDER_ACTIVE_END_HOUR:02d}:00"
-        text += f"Polling: every minute, {hours} Israel time\nDefault limits: {defaults}\nCustom limits: {overrides}"
+        hours = f"{config.monitor_start}–{config.monitor_end} ({config.monitor_timezone})"
+        text += f"Polling: every minute, {hours}\nDefault limits: {defaults}\nCustom limits: {overrides}"
     else:
         text += f"Global Threshold: {config.global_threshold:.3f}\nCustom Thresholds: {len(config.league_thresholds)}"
     if health is not None:
@@ -167,10 +205,131 @@ async def cb_menu_status(callback: CallbackQuery):
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
     await callback.answer()
 
+@router.callback_query(F.data.regexp(r"^view_thresholds:\d+$"))
+async def cb_view_thresholds(callback: CallbackQuery):
+    if not config.under_totals:
+        await callback.answer("Open /menu to refresh.")
+        return
+    leagues = list(SUPPORTED_LEAGUES)
+    size = 5
+    page = min(int(callback.data.split(":")[1]), (len(leagues) - 1) // size)
+    lines = ["📋 Effective thresholds", "Custom values are marked with ✏️; other values are defaults.", ""]
+    for league in leagues[page * size:(page + 1) * size]:
+        status = "enabled" if league in config.active_leagues else "disabled"
+        lines.append(f"{SUPPORTED_LEAGUES[league]['flag']} {league} ({status})")
+        for line in UNDER_DEFAULT_THRESHOLDS:
+            marker = " ✏️" if str(line) in config.under_thresholds.get(league, {}) else ""
+            lines.append(f"  Under {line}: {config.get_under_threshold(league, line) * 100:g}¢{marker}")
+        lines.append("")
+    await callback.message.edit_text("\n".join(lines), reply_markup=paged_kb("view_thresholds", page, len(leagues), size))
+    await callback.answer()
+
+@router.callback_query(F.data.regexp(r"^live_markets:\d+$"))
+async def cb_live_markets(callback: CallbackQuery):
+    """Render the last successful poll without making a fresh API request."""
+    if not config.under_totals:
+        await callback.answer("Open /menu to refresh.")
+        return
+    snapshot = market_snapshot or {}
+    markets = [(market, price) for market, price in snapshot.get("markets", []) if market.league in config.active_leagues]
+    markets.sort(key=lambda item: (item[0].league, item[0].title, item[0].line))
+    size = 6
+    page = min(int(callback.data.split(":")[1]), max(0, (len(markets) - 1) // size))
+    if not snapshot.get("at"):
+        text = "⚽ Live markets\nNo successful poll yet. Markets appear here after the next poll."
+    else:
+        at = snapshot["at"].astimezone(ZoneInfo(config.monitor_timezone)).strftime("%Y-%m-%d %H:%M %Z")
+        text = f"⚽ Live markets\nLast successful poll: {at}\nPrices may have changed since then.\n"
+        if not markets:
+            text += "\nNo monitored markets in the latest poll."
+        for market, price in markets[page * size:(page + 1) * size]:
+            ask = f"{price * 100:g}¢" if price is not None else "No ask"
+            limit = config.get_under_threshold(market.league, market.line) * 100
+            text += f"\n\n{market.title}\n{market.league} · Under {market.line}\nAsk: {ask} · Current limit: {limit:g}¢"
+            if market.score:
+                text += f" · Score: {market.score}"
+        text += "\n\nA qualifying price may already have alerted."
+    await callback.message.edit_text(text, reply_markup=paged_kb("live_markets", page, len(markets), size))
+    await callback.answer()
+
+def schedule_text():
+    now = datetime.now(timezone.utc)
+    active = config.monitoring_active(now)
+    text = f"🕒 Monitoring schedule\n{config.monitor_start}–{config.monitor_end} · {config.monitor_timezone}\nStatus: {'Active' if active else 'Outside monitoring hours'}"
+    if not active:
+        text += f"\nNext start: {config.next_monitor_start(now).strftime('%Y-%m-%d %H:%M %Z')}"
+    return text
+
+@router.callback_query(F.data == "menu_schedule")
+async def cb_schedule(callback: CallbackQuery):
+    if not config.under_totals:
+        await callback.answer("Open /menu to refresh.")
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✏️ Change schedule", callback_data="edit_schedule")], [InlineKeyboardButton(text="🏠 Main menu", callback_data="menu_main")]])
+    await callback.message.edit_text(schedule_text(), reply_markup=kb)
+    await callback.answer()
+
+@router.callback_query(F.data == "edit_schedule")
+async def cb_edit_schedule(callback: CallbackQuery, state: FSMContext):
+    if not config.under_totals:
+        await callback.answer("Open /menu to refresh.")
+        return
+    await state.set_state(BotStates.waiting_for_schedule)
+    await callback.message.edit_text("Send start, end and timezone on one line.\nExample: 14:00 23:00 Asia/Jerusalem\nUse 24-hour times and an IANA timezone such as Europe/London. Overnight windows are supported. Type /cancel to stop.")
+    await callback.answer()
+
+@router.message(BotStates.waiting_for_schedule)
+async def process_schedule(message: Message, state: FSMContext):
+    """Validate and save a complete start/end/timezone input or retain edit state."""
+    parts = (message.text or "").strip().split()
+    try:
+        if len(parts) != 3:
+            raise ValueError
+        saved = config.set_monitor_schedule(*parts)
+    except (ValueError, TypeError, ZoneInfoNotFoundError):
+        await message.answer("Please use different valid 24-hour times and a valid timezone, for example: 14:00 23:00 Asia/Jerusalem. Or /cancel.")
+        return
+    if not saved:
+        await message.answer("Could not save the schedule. Try again, or /cancel.")
+        return
+    await state.clear()
+    await message.answer("✅ Schedule saved. It applies on the next poll.\n\n" + schedule_text(), reply_markup=get_main_menu_kb())
+
+@router.callback_query(F.data == "test_notification")
+async def cb_test_notification(callback: CallbackQuery):
+    """Exercise the configured alert sender without claiming a market alert."""
+    if not config.under_totals or test_sender is None:
+        await callback.answer("Test notification is unavailable.", show_alert=True)
+        return
+    result = await test_sender("🔔 <b>Test notification</b>\nYour Soccer Monitor notification channel is working.")
+    status = "Test notification sent." if result is True else ("Delivery was uncertain. Check your messages." if result is None else "Test notification failed. Check Telegram settings and status.")
+    await callback.answer(status, show_alert=True)
+
 @router.callback_query(F.data == "menu_thresholds")
 async def cb_menu_thresholds(callback: CallbackQuery):
-    prompt = "Choose a league." if config.under_totals else "Select a threshold to modify:"
+    prompt = "Choose a league or all leagues." if config.under_totals else "Select a threshold to modify:"
     await callback.message.edit_text(f"⚙️ *Edit Thresholds*\n{prompt}", reply_markup=get_thresholds_menu_kb(), parse_mode="Markdown")
+    await callback.answer()
+
+@router.callback_query(F.data == "under_all")
+async def cb_under_all(callback: CallbackQuery):
+    if not config.under_totals:
+        await callback.answer("Open /menu to refresh.")
+        return
+    await callback.message.edit_text("All supported leagues, including disabled leagues.\nChoose a full-game Under line.", reply_markup=get_under_all_lines_kb())
+    await callback.answer()
+
+@router.callback_query(F.data.regexp(r"^under_all_edit:(5\.5|6\.5|7\.5)$"))
+async def cb_under_all_edit(callback: CallbackQuery, state: FSMContext):
+    if not config.under_totals:
+        await callback.answer("Open /menu to refresh.")
+        return
+    line_text = callback.data.split(":", 1)[1]
+    await state.update_data(target_league=None, target_under_line=float(line_text))
+    await state.set_state(BotStates.waiting_for_under_threshold)
+    await callback.message.edit_text(
+        f"All supported leagues · Under {line_text}\nEnter the price limit in cents, e.g. 80 or 85.5. This replaces existing limits for this line. Type /cancel to go back."
+    )
     await callback.answer()
 
 @router.callback_query(F.data.startswith("under_league:"))
@@ -205,6 +364,7 @@ async def cmd_cancel(message: Message, state: FSMContext):
 
 @router.message(BotStates.waiting_for_under_threshold)
 async def process_under_threshold(message: Message, state: FSMContext):
+    """Convert cents to a price and save either one league or all supported leagues."""
     try:
         cents = Decimal((message.text or "").strip())
         if not cents.is_finite() or not 0 < cents <= 100:
@@ -218,11 +378,16 @@ async def process_under_threshold(message: Message, state: FSMContext):
 
     data = await state.get_data()
     league, line = data["target_league"], data["target_under_line"]
-    if not config.set_under_threshold(league, line, price):
+    saved = (config.set_under_threshold_all_leagues(line, price) if league is None
+             else config.set_under_threshold(league, line, price))
+    if not saved:
         await message.answer("Could not save the threshold. Try again, or /cancel.")
         return
     await state.clear()
-    await message.answer(f"{league} · Under {line} limit saved at {price * 100:g}¢.", reply_markup=get_under_lines_kb(league))
+    if league is None:
+        await message.answer(f"All supported leagues · Under {line} limit saved at {price * 100:g}¢.", reply_markup=get_under_all_lines_kb())
+    else:
+        await message.answer(f"{league} · Under {line} limit saved at {price * 100:g}¢.", reply_markup=get_under_lines_kb(league))
 
 @router.callback_query(F.data == "menu_leagues")
 async def cb_menu_leagues(callback: CallbackQuery):
@@ -343,10 +508,14 @@ async def catch_all_message(message: Message, state: FSMContext):
 
 
 async def start_bot_polling(bot_token: str, runtime_config: RuntimeConfig,
-                            chat_id: Optional[str], api_health: Any = None):
-    global config, allowed_chat_id, health
+                            chat_id: Optional[str], api_health: Any = None,
+                            snapshot: Any = None, notification_sender: Any = None):
+    """Initialize shared UI dependencies and poll only when a valid chat ID is set."""
+    global config, allowed_chat_id, health, market_snapshot, test_sender
     config = runtime_config
     health = api_health
+    market_snapshot = snapshot
+    test_sender = notification_sender
     if chat_id:
         try:
             allowed_chat_id = int(chat_id)

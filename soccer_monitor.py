@@ -1,6 +1,10 @@
 """
-Soccer Monitor Daemon
-Monitors Polymarket soccer Over/Under markets for price dips.
+Websocket-based soccer Under price-dip monitor and shared alert infrastructure.
+
+This daemon discovers markets using Polymarket and API-Football fixtures, then
+tracks sell-side order books over a websocket. live_under_monitor imports its
+health, notification and market-title helpers but implements a separate polling
+strategy and persistent alert history.
 """
 
 import asyncio
@@ -262,6 +266,7 @@ def parse_game_total_line(question: str) -> Optional[float]:
 
 @dataclass
 class MarketInfo:
+    """Discovery metadata associated with an Under token and optional fixture."""
     event_title: str
     event_slug: str
     league: str
@@ -271,6 +276,11 @@ class MarketInfo:
 
 
 class LiveMatchTracker:
+    """Cache API-Football fixtures and fetch scores only for candidate alerts.
+
+    Cached fixtures are filtered against current league settings on read, so a
+    Telegram league toggle can take effect without another daily schedule fetch.
+    """
     def __init__(self, session: aiohttp.ClientSession, runtime_config: RuntimeConfig,
                  health: Optional["ApiHealth"] = None):
         self.session = session
@@ -519,6 +529,11 @@ class LiveMatchTracker:
 
 
 class AlertEngine:
+    """Send Telegram messages and track websocket-daemon token alerts in memory.
+
+    The websocket history is cleared at the Israel-local date change; the polling
+    daemon instead claims tokens in its own SQLite database.
+    """
     def __init__(self, session: aiohttp.ClientSession, health: Optional["ApiHealth"] = None):
         self.health = health or ApiHealth()
         self.session = session
@@ -583,6 +598,11 @@ class AlertEngine:
 
 
 class MarketDiscovery:
+    """Combine Gamma soccer markets with cached fixtures and team-name mappings.
+
+    A failed scan returns None so the caller can retain the last subscriptions;
+    a successful scan may return an empty dictionary.
+    """
     def __init__(self, session: aiohttp.ClientSession, live_match_tracker: LiveMatchTracker,
                  runtime_config: RuntimeConfig, health: Optional["ApiHealth"] = None):
         self.health = health or ApiHealth()
@@ -815,6 +835,7 @@ class MarketDiscovery:
 
 
 class SimulatedWebsocket:
+    """Emit a small synthetic book/update sequence for SIMULATION_MODE."""
     """A mock websocket to simulate price drops for the mock market."""
     async def __aenter__(self):
         return self
@@ -855,6 +876,12 @@ class SimulatedWebsocket:
             await asyncio.sleep(60)
 
 class OrderBookMonitor:
+    """Maintain ask books and detect confirmed downward threshold crossings.
+
+    Tokens arm after an observed ask at or above their threshold. Confirmation runs
+    concurrently with websocket reads, allowing subsequent updates to invalidate a
+    dip; score checks suppress Under outcomes already defeated by the score.
+    """
     def __init__(self, alert_engine: AlertEngine, live_match_tracker: LiveMatchTracker,
                  markets_changed_event: asyncio.Event, runtime_config: RuntimeConfig,
                  health: Optional["ApiHealth"] = None):
@@ -880,6 +907,7 @@ class OrderBookMonitor:
         self.markets_changed_event = markets_changed_event
 
     async def set_markets(self, markets: Dict[str, MarketInfo]):
+        """Replace discovery metadata and signal a reconnect only if tokens change."""
         async with self.markets_lock:
             # The socket subscribes by token id alone, so only a changed key set is
             # worth a reconnect. Firing unconditionally tore down a healthy connection
@@ -892,6 +920,7 @@ class OrderBookMonitor:
             self.markets_changed_event.set()
 
     async def process_dip(self, token_id: str, current_ask: float):
+        """Confirm an armed crossing, check its score, and send at most one daily alert."""
         async with self.markets_lock:
             market = self.monitored_markets.get(token_id)
         if not market:
@@ -1004,6 +1033,7 @@ class OrderBookMonitor:
             task.add_done_callback(self.dip_tasks.discard)
 
     async def _process_event(self, data: dict):
+        """Apply a full book snapshot or sell-side level changes to cached asks."""
         if not isinstance(data, dict):
             return
             
@@ -1058,6 +1088,7 @@ class OrderBookMonitor:
             await self._handle_message(message)
 
     async def run(self):
+        """Subscribe to current tokens, reconnect on changes, and discard stale books."""
         while True:
             async with self.markets_lock:
                 if not self.monitored_markets:
@@ -1149,6 +1180,7 @@ class OrderBookMonitor:
 
 
 async def main():
+    """Compose discovery, websocket, error delivery and optional Telegram tasks."""
     logger.info("Starting Soccer Over/Under Dip Detection Daemon...")
     
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:

@@ -15,7 +15,7 @@ from aiogram.types import Chat, Message
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import bot_ui
-from config_manager import RuntimeConfig
+from config_manager import RuntimeConfig, SUPPORTED_LEAGUES
 from live_under_monitor import ApiHealth, fetch_live_markets, is_active, poll_once, prepare_alert_history
 
 
@@ -164,6 +164,41 @@ class LiveUnderMonitorTests(unittest.TestCase):
                 self.assertEqual(config.get_under_threshold("La Liga", 5.5), 0.806)
                 self.assertEqual(config.get_under_threshold("La Liga", 6.5), 0.85)
                 self.assertEqual(config.get_under_threshold("Premier League", 5.5), 0.80)
+                state.clear.assert_awaited_once()
+            finally:
+                bot_ui.config = previous
+
+    def test_bulk_threshold_persists_all_leagues_and_preserves_other_lines(self):
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            config = RuntimeConfig(path, under_totals=True)
+            config.set_under_threshold("La Liga", 5.5, 0.7)
+            config.set_under_threshold("La Liga", 6.5, 0.6)
+            self.assertTrue(config.set_under_threshold_all_leagues(5.5, 0.82))
+            reloaded = RuntimeConfig(path, under_totals=True)
+            for league in SUPPORTED_LEAGUES:
+                self.assertEqual(reloaded.get_under_threshold(league, 5.5), 0.82)
+            self.assertEqual(reloaded.get_under_threshold("La Liga", 6.5), 0.6)
+            with patch.object(config, "save", return_value=False):
+                self.assertFalse(config.set_under_threshold_all_leagues(5.5, 0.9))
+            self.assertEqual(config.get_under_threshold("La Liga", 5.5), 0.82)
+            self.assertEqual(RuntimeConfig(path, under_totals=True).get_under_threshold("La Liga", 5.5), 0.82)
+
+    def test_telegram_bulk_threshold_flow(self):
+        with TemporaryDirectory() as tmp:
+            config = RuntimeConfig(Path(tmp) / "config.json", under_totals=True)
+            previous = bot_ui.config
+            bot_ui.config = config
+            try:
+                self.assertTrue(any(row[0].callback_data == "under_all" for row in bot_ui.get_thresholds_menu_kb().inline_keyboard))
+                callback = SimpleNamespace(data="under_all_edit:6.5", message=SimpleNamespace(edit_text=AsyncMock()), answer=AsyncMock())
+                state = AsyncMock()
+                asyncio.run(bot_ui.cb_under_all_edit(callback, state))
+                state.update_data.assert_awaited_once_with(target_league=None, target_under_line=6.5)
+                state.get_data.return_value = {"target_league": None, "target_under_line": 6.5}
+                message = SimpleNamespace(text="88.5", answer=AsyncMock())
+                asyncio.run(bot_ui.process_under_threshold(message, state))
+                self.assertTrue(all(config.get_under_threshold(league, 6.5) == 0.885 for league in SUPPORTED_LEAGUES))
                 state.clear.assert_awaited_once()
             finally:
                 bot_ui.config = previous

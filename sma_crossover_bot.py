@@ -4,7 +4,8 @@ S&P 500 — 150-Day SMA Crossover Alert Bot
 Scans all S&P 500 stocks for price crossovers above the 150-day Simple Moving
 Average. Sends Telegram alerts with mini-charts. Runs 2× daily on weekdays.
 
-Schedule: 16:35, 18:30 IDT (Asia/Jerusalem), Monday–Friday.
+Schedule: 16:35 and 18:30 Asia/Jerusalem, Monday–Friday. Alert date and caption
+timestamps use the fixed UTC+3 IDT constant, which differs in Israel's winter.
 """
 
 import argparse
@@ -225,6 +226,7 @@ def detect_crossovers(tickers: list[str]) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def load_state() -> dict:
+    """Read ticker-to-last-alert-date state; missing or malformed files act empty."""
     if STATE_FILE.exists():
         try:
             return json.loads(STATE_FILE.read_text())
@@ -234,6 +236,7 @@ def load_state() -> dict:
 
 
 def save_state(state: dict) -> None:
+    """Write ticker alert dates to the local JSON state file."""
     STATE_FILE.write_text(json.dumps(state, indent=2))
 
 

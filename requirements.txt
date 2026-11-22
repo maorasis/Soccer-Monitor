@@ -143,9 +143,10 @@ typing-extensions==4.16.0
     #   typing-inspection
 typing-inspection==0.4.4
     # via pydantic
-tzdata==2026.3 ; python_full_version < '3.11' or sys_platform == 'emscripten' or sys_platform == 'win32'
+tzdata==2026.3
     # via
     #   pandas
+    #   polymarket-margins
     #   tzlocal
 tzlocal==5.4.4
     # via apscheduler

@@ -10,6 +10,7 @@ dependencies = [
     "pandas",
     "python-dotenv",
     "requests",
+    "tzdata",
     "websockets",
     "yfinance",
 ]

@@ -81,9 +81,11 @@ def auto_match(poly_team: str, api_teams: Set[str]) -> str | None:
 
 
 async def fetch_api_football_teams(session: aiohttp.ClientSession, config: RuntimeConfig) -> Set[str]:
-    """Fetches all teams enrolled in each supported league for the current season.
-    Tries current year first, falls back to previous year (most European leagues
-    span two calendar years, e.g. 2025/26, and API-Football uses the start year)."""
+    """Fetch teams from every supported league using the hard-coded 2024 season.
+
+    Requests are spaced out and an HTTP 429 is retried once. The config argument
+    does not restrict this roster to currently enabled leagues.
+    """
     if not API_FOOTBALL_KEY:
         logger.error("API_FOOTBALL_KEY is required.")
         return set()

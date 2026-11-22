@@ -1,8 +1,16 @@
+"""Persist shared league, threshold and live-Under schedule configuration.
+
+The JSON file is shared by monitor components in a process. RuntimeConfig keeps an
+in-memory copy; changing the file externally does not automatically reload it.
+"""
+
 import json
 import os
 import logging
 import tempfile
 from typing import Dict, List, Set
+from datetime import timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 logger = logging.getLogger("ConfigManager")
 
@@ -44,6 +52,11 @@ UNDER_ACTIVE_START_HOUR = 14
 UNDER_ACTIVE_END_HOUR = 23
 
 class RuntimeConfig:
+    """Mutable runtime settings backed by an atomically replaced JSON file.
+
+    Under limits are keyed by league and stringified goal line; absent entries use
+    UNDER_DEFAULT_THRESHOLDS. Prices are dollar fractions, not cents.
+    """
     def __init__(self, filepath=None, *, under_totals=False):
         if filepath is None:
             filepath = os.path.join(SCRIPT_DIR, "config_state.json")
@@ -55,10 +68,14 @@ class RuntimeConfig:
         self.active_leagues: List[str] = list(DEFAULT_ACTIVE_LEAGUES)
         self.league_thresholds: Dict[str, float] = {} # e.g. {"La Liga": 0.08}
         self.under_thresholds: Dict[str, Dict[str, float]] = {}
+        self.monitor_start = "14:00"
+        self.monitor_end = "23:00"
+        self.monitor_timezone = "Asia/Jerusalem"
         
         self.load()
 
     def load(self):
+        """Load saved fields, retaining defaults for absent or invalid schedule fields."""
         if os.path.exists(self.filepath):
             try:
                 with open(self.filepath, 'r') as f:
@@ -67,6 +84,14 @@ class RuntimeConfig:
                 self.active_leagues = data.get("active_leagues", self.active_leagues)
                 self.league_thresholds = data.get("league_thresholds", self.league_thresholds)
                 self.under_thresholds = data.get("under_thresholds", {})
+                schedule = data.get("monitor_schedule", {})
+                try:
+                    self._validate_schedule(schedule.get("start", "14:00"), schedule.get("end", "23:00"), schedule.get("timezone", "Asia/Jerusalem"))
+                    self.monitor_start = schedule.get("start", "14:00")
+                    self.monitor_end = schedule.get("end", "23:00")
+                    self.monitor_timezone = schedule.get("timezone", "Asia/Jerusalem")
+                except (ValueError, TypeError, ZoneInfoNotFoundError):
+                    logger.warning("Invalid monitoring schedule; using defaults")
                 logger.info(f"Loaded config from {self.filepath}")
             except Exception as e:
                 logger.error(f"Failed to load config: {e}")
@@ -74,10 +99,12 @@ class RuntimeConfig:
             self.save() # Create initial file
 
     def save(self):
+        """Replace the config file atomically; return False on any write failure."""
         data = {
             "global_threshold": self.global_threshold,
             "active_leagues": self.active_leagues,
             "league_thresholds": self.league_thresholds,
+            "monitor_schedule": {"start": getattr(self, "monitor_start", "14:00"), "end": getattr(self, "monitor_end", "23:00"), "timezone": getattr(self, "monitor_timezone", "Asia/Jerusalem")},
         }
         under_thresholds = getattr(self, "under_thresholds", {})
         if under_thresholds:
@@ -106,14 +133,74 @@ class RuntimeConfig:
             return False
 
     def get_under_threshold(self, league: str, line: float) -> float:
+        """Resolve a league override or the built-in default for a supported line."""
         return self.under_thresholds.get(league, {}).get(str(line), UNDER_DEFAULT_THRESHOLDS[line])
 
+    @staticmethod
+    def _validate_schedule(start, end, timezone_name):
+        for value in (start, end):
+            if not isinstance(value, str) or len(value) != 5 or value[2] != ":" or not (value[:2] + value[3:]).isdigit():
+                raise ValueError("Use HH:MM")
+            hour, minute = map(int, value.split(":"))
+            if hour > 23 or minute > 59:
+                raise ValueError("Invalid time")
+        if start == end:
+            raise ValueError("Start and end must differ")
+        ZoneInfo(timezone_name)
+
+    def set_monitor_schedule(self, start, end, timezone_name):
+        """Validate and persist a daily schedule; roll back memory if saving fails."""
+        self._validate_schedule(start, end, timezone_name)
+        previous = (self.monitor_start, self.monitor_end, self.monitor_timezone)
+        self.monitor_start, self.monitor_end, self.monitor_timezone = start, end, timezone_name
+        if self.save():
+            return True
+        self.monitor_start, self.monitor_end, self.monitor_timezone = previous
+        return False
+
+    def monitoring_active(self, now):
+        """Check a timezone-aware instant against the half-open daily window.
+
+        When start is later than end, the window crosses midnight.
+        """
+        local = now.astimezone(ZoneInfo(self.monitor_timezone))
+        current = local.strftime("%H:%M")
+        if self.monitor_start < self.monitor_end:
+            return self.monitor_start <= current < self.monitor_end
+        return current >= self.monitor_start or current < self.monitor_end
+
+    def next_monitor_start(self, now):
+        """Find the next active minute as a real instant, accounting for DST changes."""
+        # Search real instants so skipped and repeated local times at DST changes
+        # reflect when the monitor can actually become active.
+        candidate = now.astimezone(timezone.utc).replace(second=0, microsecond=0) + timedelta(minutes=1)
+        for _ in range(3 * 24 * 60):
+            if self.monitoring_active(candidate):
+                return candidate.astimezone(ZoneInfo(self.monitor_timezone))
+            candidate += timedelta(minutes=1)
+        raise ValueError("Could not find the next monitoring window")
+
     def set_under_threshold(self, league: str, line: float, price: float) -> bool:
+        """Persist one validated override, restoring the prior state on save failure."""
         if league not in SUPPORTED_LEAGUES or line not in UNDER_DEFAULT_THRESHOLDS or not 0 < price <= 1:
             raise ValueError("Invalid league, goal line or price")
         previous = self.under_thresholds
         overrides = previous.get(league, {}) | {str(line): price}
         self.under_thresholds = previous | {league: overrides}
+        if self.save():
+            return True
+        self.under_thresholds = previous
+        return False
+
+    def set_under_threshold_all_leagues(self, line: float, price: float) -> bool:
+        """Replace one line for all supported leagues in one atomic config save."""
+        if line not in UNDER_DEFAULT_THRESHOLDS or not 0 < price <= 1:
+            raise ValueError("Invalid goal line or price")
+        previous = self.under_thresholds
+        self.under_thresholds = previous | {
+            league: previous.get(league, {}) | {str(line): price}
+            for league in SUPPORTED_LEAGUES
+        }
         if self.save():
             return True
         self.under_thresholds = previous

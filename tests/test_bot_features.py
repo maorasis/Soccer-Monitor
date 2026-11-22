@@ -1,0 +1,91 @@
+import asyncio
+import sqlite3
+import unittest
+from datetime import datetime, timezone
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
+import bot_ui
+from config_manager import RuntimeConfig
+from live_under_monitor import ApiHealth, UnderMarket, poll_once, prepare_alert_history
+from tests.test_live_under_monitor import MarketAPI, NOW
+
+
+class BotFeatureTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "config.json"
+        self.config = RuntimeConfig(self.path, under_totals=True)
+        self.old = bot_ui.config, bot_ui.market_snapshot, bot_ui.test_sender
+        bot_ui.config = self.config
+        bot_ui.market_snapshot = {}
+        bot_ui.test_sender = None
+
+    def tearDown(self):
+        bot_ui.config, bot_ui.market_snapshot, bot_ui.test_sender = self.old
+        self.tmp.cleanup()
+
+    def callback(self, data):
+        return SimpleNamespace(data=data, message=SimpleNamespace(edit_text=AsyncMock()), answer=AsyncMock())
+
+    def test_threshold_view_identifies_custom_values_and_disabled_leagues(self):
+        self.config.set_under_threshold("La Liga", 5.5, .75)
+        self.config.active_leagues.remove("La Liga")
+        callback = self.callback("view_thresholds:0")
+        asyncio.run(bot_ui.cb_view_thresholds(callback))
+        text = callback.message.edit_text.await_args.args[0]
+        self.assertIn("La Liga (disabled)", text)
+        self.assertIn("Under 5.5: 75¢ ✏️", text)
+        self.assertIn("Under 6.5: 85¢", text)
+
+    def test_snapshot_records_poll_and_live_view_uses_current_limit(self):
+        snapshot = {}
+        with sqlite3.connect(":memory:") as db:
+            prepare_alert_history(db)
+            asyncio.run(poll_once(MarketAPI(), self.config, db, AsyncMock(return_value=True), ApiHealth(), NOW, snapshot))
+        self.assertEqual(snapshot["at"], NOW)
+        bot_ui.market_snapshot = snapshot
+        self.config.set_under_threshold("Premier League", 5.5, .77)
+        callback = self.callback("live_markets:0")
+        asyncio.run(bot_ui.cb_live_markets(callback))
+        text = callback.message.edit_text.await_args.args[0]
+        self.assertIn("Ask: 80¢ · Current limit: 77¢", text)
+        self.assertIn("No ask", text)
+        self.assertIn("Last successful poll", text)
+
+    def test_test_notification_reports_delivery_outcomes(self):
+        for result, expected in [(True, "sent"), (False, "failed"), (None, "uncertain")]:
+            bot_ui.test_sender = AsyncMock(return_value=result)
+            callback = self.callback("test_notification")
+            asyncio.run(bot_ui.cb_test_notification(callback))
+            self.assertIn(expected, callback.answer.await_args.args[0])
+            self.assertIn("Test notification", bot_ui.test_sender.await_args.args[0])
+
+    def test_schedule_persistence_overnight_and_timezone(self):
+        self.assertTrue(self.config.set_monitor_schedule("22:30", "02:15", "Europe/London"))
+        config = RuntimeConfig(self.path, under_totals=True)
+        self.assertTrue(config.monitoring_active(datetime(2026, 1, 1, 23, tzinfo=timezone.utc)))
+        self.assertTrue(config.monitoring_active(datetime(2026, 1, 2, 2, 14, tzinfo=timezone.utc)))
+        self.assertFalse(config.monitoring_active(datetime(2026, 1, 2, 2, 15, tzinfo=timezone.utc)))
+        self.assertEqual(config.next_monitor_start(datetime(2026, 1, 2, 2, 15, tzinfo=timezone.utc)).hour, 22)
+        with patch.object(config, "save", return_value=False):
+            self.assertFalse(config.set_monitor_schedule("10:00", "11:00", "UTC"))
+        self.assertEqual(config.monitor_start, "22:30")
+        with self.assertRaises(ValueError):
+            config.set_monitor_schedule("12:00", "12:00", "UTC")
+
+    def test_schedule_telegram_validation_and_success(self):
+        message = SimpleNamespace(text="25:00 10:00 UTC", answer=AsyncMock())
+        state = AsyncMock()
+        asyncio.run(bot_ui.process_schedule(message, state))
+        state.clear.assert_not_awaited()
+        message.text = "09:30 18:15 UTC"
+        asyncio.run(bot_ui.process_schedule(message, state))
+        state.clear.assert_awaited_once()
+        self.assertEqual(RuntimeConfig(self.path, under_totals=True).monitor_end, "18:15")
+
+
+if __name__ == "__main__":
+    unittest.main()

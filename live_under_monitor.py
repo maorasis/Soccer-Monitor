@@ -1,3 +1,10 @@
+"""Poll live full-game Under markets and send at-most-once alerts per token.
+
+The monitor shares configuration, Telegram UI and health reporting with the older
+websocket daemon, but has its own discovery, price checks and SQLite alert history.
+Prices are fractions of a dollar internally; the control panel accepts cents.
+"""
+
 import asyncio
 import html
 import json
@@ -10,6 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import partial
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import aiohttp
 
@@ -37,6 +45,7 @@ MAX_MATCH_AGE = timedelta(hours=4)
 
 @dataclass(frozen=True)
 class UnderMarket:
+    """Metadata needed to display and evaluate one Under outcome token."""
     league: str
     line: float
     title: str
@@ -45,14 +54,25 @@ class UnderMarket:
 
 
 def is_active(now: datetime) -> bool:
+    """Check the original default Israel-time window, independent of saved settings.
+
+    The running poll loop uses RuntimeConfig.monitoring_active instead.
+    """
     return UNDER_ACTIVE_START_HOUR <= now.astimezone(ISRAEL_TZ).hour < UNDER_ACTIVE_END_HOUR
 
 
 def prepare_alert_history(db: sqlite3.Connection) -> None:
+    """Create the persistent token claim table without deleting existing claims."""
     db.execute("CREATE TABLE IF NOT EXISTS alerted (token_id TEXT PRIMARY KEY)")
 
 
 async def fetch_live_markets(session, config: RuntimeConfig, now: datetime) -> dict[str, UnderMarket]:
+    """Return eligible live Under markets keyed by token ID, following Gamma cursors.
+
+    Only enabled leagues, recent live events, open full-game totals and configured
+    Under lines qualify. A failed page raises so callers do not treat a partial scan
+    as a complete snapshot.
+    """
     if not config.active_leagues:
         return {}
 
@@ -119,6 +139,7 @@ async def fetch_live_markets(session, config: RuntimeConfig, now: datetime) -> d
 
 
 def lowest_ask(book) -> float | None:
+    """Return the lowest valid positive-size ask, or None for an empty book."""
     prices = []
     for ask in book.get("asks") or []:
         try:
@@ -131,7 +152,13 @@ def lowest_ask(book) -> float | None:
 
 
 async def poll_once(session, config: RuntimeConfig, db: sqlite3.Connection, send_text,
-                    health: ApiHealth, now: datetime) -> None:
+                    health: ApiHealth, now: datetime, snapshot=None) -> None:
+    """Fetch markets and books, update the optional UI snapshot, and send alerts.
+
+    A qualifying token is claimed in SQLite before delivery. An explicit failure
+    releases the claim for retry; uncertain delivery retains it to avoid duplicates.
+    Failed discovery/book requests leave the previous successful snapshot intact.
+    """
     dependency = DEP_GAMMA
     try:
         markets = await fetch_live_markets(session, config, now)
@@ -154,6 +181,9 @@ async def poll_once(session, config: RuntimeConfig, db: sqlite3.Connection, send
         return
 
     logger.info("Polled %d live Under markets, received %d order books", len(markets), len(books))
+    if snapshot is not None:
+        snapshot["at"] = now
+        snapshot["markets"] = [(market, lowest_ask(books.get(token, {}))) for token, market in markets.items()]
     for token, market in markets.items():
         if market.league not in config.active_leagues:
             continue
@@ -190,20 +220,26 @@ async def poll_once(session, config: RuntimeConfig, db: sqlite3.Connection, send
                            market.title, market.line)
 
 
-async def run_polls(session, config, db, send_text, health):
+async def run_polls(session, config, db, send_text, health, snapshot=None):
+    """Poll on minute boundaries inside the saved local-time monitoring window."""
     while True:
         now = datetime.now(ISRAEL_TZ)
-        if is_active(now):
-            close = now.replace(hour=UNDER_ACTIVE_END_HOUR, minute=0, second=0, microsecond=0)
-            seconds_until_close = (close - now).total_seconds()
+        if config.monitoring_active(now):
+            local = now.astimezone(ZoneInfo(config.monitor_timezone))
+            hour, minute = map(int, config.monitor_end.split(":"))
+            close = local.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if close <= local:
+                close = (local + timedelta(days=1)).replace(hour=hour, minute=minute, second=0, microsecond=0)
+            seconds = (close.astimezone(timezone.utc) - now.astimezone(timezone.utc)).total_seconds()
             try:
-                await asyncio.wait_for(poll_once(session, config, db, send_text, health, now), seconds_until_close)
+                await asyncio.wait_for(poll_once(session, config, db, send_text, health, now, snapshot), max(0, seconds))
             except asyncio.TimeoutError:
                 logger.info("Polling window closed during the final poll")
         await asyncio.sleep(60 - time.time() % 60)
 
 
 async def main():
+    """Own the HTTP session, SQLite connection and concurrent long-running tasks."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         raise RuntimeError("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required")
     int(TELEGRAM_CHAT_ID)
@@ -211,18 +247,19 @@ async def main():
     health = ApiHealth((DEP_GAMMA, DEP_BOOKS, DEP_TELEGRAM))
     error_queue = asyncio.Queue(maxsize=100)
     logging.getLogger().addHandler(ErrorAlertHandler(error_queue))
-    logger.info("Starting live Under monitor, active from %02d:00 to %02d:00 Israel time",
-                UNDER_ACTIVE_START_HOUR, UNDER_ACTIVE_END_HOUR)
+    logger.info("Starting live Under monitor, active from %s to %s (%s)",
+                config.monitor_start, config.monitor_end, config.monitor_timezone)
 
     history = Path(config.filepath).with_name("live_under_alerts.sqlite3")
     with closing(sqlite3.connect(history)) as db:
         prepare_alert_history(db)
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
             alerts = AlertEngine(session, health)
+            snapshot = {}
             tasks = asyncio.gather(
-                run_polls(session, config, db, partial(alerts.send_text, report_uncertain=True), health),
+                run_polls(session, config, db, partial(alerts.send_text, report_uncertain=True), health, snapshot),
                 error_alert_loop(alerts, error_queue),
-                start_bot_polling(TELEGRAM_BOT_TOKEN, config, TELEGRAM_CHAT_ID, health),
+                start_bot_polling(TELEGRAM_BOT_TOKEN, config, TELEGRAM_CHAT_ID, health, snapshot, partial(alerts.send_text, report_uncertain=True)),
             )
             loop = asyncio.get_running_loop()
             for sig in (signal.SIGTERM, signal.SIGINT):

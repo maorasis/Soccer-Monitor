@@ -1,3 +1,9 @@
+"""Report mapping keys containing a colon without an equivalent standalone key.
+
+The script reads team_mapping.json relative to the current working directory and
+prints suggestions; it never changes the mapping.
+"""
+
 import json
 
 def check_mapping():

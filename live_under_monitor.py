@@ -192,7 +192,7 @@ async def poll_once(session, config: RuntimeConfig, db: sqlite3.Connection, send
         if price is None or price > threshold:
             continue
 
-        # Telegram has no idempotency key. Commit before sending to prevent a
+        # Telegram has no idempotency key. Commit the token claim before sending to prevent a
         # restart or an ambiguous network failure from sending a second alert.
         with db:
             claimed = db.execute("INSERT OR IGNORE INTO alerted VALUES (?)", (token,)).rowcount

@@ -101,7 +101,7 @@ sudo apt update && sudo apt upgrade -y
 sudo apt install -y python3-venv python3-pip git nano
 
 cd /home/ubuntu
-git clone git@github.com:Bumblebee621/soccer_monitor.git
+git clone git@github.com:maorasis/Soccer-Monitor.git soccer_monitor
 cd soccer_monitor
 
 python3 -m venv venv

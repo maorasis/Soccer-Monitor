@@ -18,13 +18,13 @@ class BotFeatureTests(unittest.TestCase):
         self.tmp = TemporaryDirectory()
         self.path = Path(self.tmp.name) / "config.json"
         self.config = RuntimeConfig(self.path, under_totals=True)
-        self.old = bot_ui.config, bot_ui.market_snapshot, bot_ui.test_sender
+        self.old = bot_ui.config, bot_ui.market_fetcher, bot_ui.test_sender
         bot_ui.config = self.config
-        bot_ui.market_snapshot = {}
+        bot_ui.market_fetcher = None
         bot_ui.test_sender = None
 
     def tearDown(self):
-        bot_ui.config, bot_ui.market_snapshot, bot_ui.test_sender = self.old
+        bot_ui.config, bot_ui.market_fetcher, bot_ui.test_sender = self.old
         self.tmp.cleanup()
 
     def callback(self, data):
@@ -46,14 +46,47 @@ class BotFeatureTests(unittest.TestCase):
             prepare_alert_history(db)
             asyncio.run(poll_once(MarketAPI(), self.config, db, AsyncMock(return_value=True), ApiHealth(), NOW, snapshot))
         self.assertEqual(snapshot["at"], NOW)
-        bot_ui.market_snapshot = snapshot
+        bot_ui.market_fetcher = AsyncMock(return_value=snapshot)
         self.config.set_under_threshold("Premier League", 5.5, .77)
         callback = self.callback("live_markets:0")
         asyncio.run(bot_ui.cb_live_markets(callback))
         text = callback.message.edit_text.await_args.args[0]
         self.assertIn("Ask: 80¢ · Current limit: 77¢", text)
         self.assertIn("No ask", text)
-        self.assertIn("Last successful poll", text)
+        self.assertIn("Fetched:", text)
+        bot_ui.market_fetcher.assert_awaited_once()
+
+    def test_live_view_fetches_on_each_use_and_reports_failures(self):
+        market = UnderMarket("Premier League", 5.5, "Match", "match", "")
+        bot_ui.market_fetcher = AsyncMock(side_effect=[
+            {"at": NOW, "markets": [(market, .8)]},
+            {"at": NOW, "markets": [(market, .7)]},
+            OSError("offline"),
+        ])
+        callback = self.callback("live_markets:0")
+        for expected in ("Ask: 80¢", "Ask: 70¢", "Could not fetch current markets"):
+            asyncio.run(bot_ui.cb_live_markets(callback))
+            self.assertIn(expected, callback.message.edit_text.await_args.args[0])
+        self.assertEqual(bot_ui.market_fetcher.await_count, 3)
+
+    def test_cooldown_setting_and_rearm_callback(self):
+        state = AsyncMock()
+        message = SimpleNamespace(text="1", answer=AsyncMock())
+        asyncio.run(bot_ui.process_alert_cooldown(message, state))
+        self.assertEqual(self.config.alert_cooldown_minutes, 15)
+        state.clear.assert_not_awaited()
+
+        message.text = "20"
+        asyncio.run(bot_ui.process_alert_cooldown(message, state))
+        self.assertEqual(RuntimeConfig(self.path, under_totals=True).alert_cooldown_minutes, 20)
+        state.clear.assert_awaited_once()
+
+        button_id = "a" * 32
+        callback = self.callback(f"rearm_alert:{button_id}")
+        with patch.object(bot_ui, "rearm_alert", return_value=15) as rearm:
+            asyncio.run(bot_ui.cb_rearm_alert(callback))
+        self.assertEqual(rearm.call_args.args[0], button_id)
+        self.assertIn("15 minutes", callback.answer.await_args.args[0])
 
     def test_test_notification_reports_delivery_outcomes(self):
         for result, expected in [(True, "sent"), (False, "failed"), (None, "uncertain")]:

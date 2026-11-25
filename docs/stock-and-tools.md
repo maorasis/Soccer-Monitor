@@ -1,24 +1,6 @@
-# Stock scanner and helper scripts
+# Helper scripts
 
 Verified against the working tree on 2026-11-22.
-
-## Stock crossover scanner
-
-[`sma_crossover_bot.py`](../sma_crossover_bot.py) downloads the S&P 500 symbols
-from Wikipedia, then requests price history from yfinance in batches. In
-`detect_crossovers`, a candidate must have enough closing prices and the current
-price must be above the selected 150-day average while the preceding close was
-strictly below that same average. The selected bar differs depending on whether
-today's bar is present; data older than three days is skipped.
-
-`scan_stocks` filters tickers recorded for today, renders PNG charts and sends
-Telegram notifications, then records the candidates. Delivery helpers log failures
-but do not return success to `scan_stocks`, so a candidate may still be recorded
-after a failed notification. `--dry-run` logs without sending; `--scan-now` sends
-but does not persist state. The scheduler triggers at 16:35 and 18:30 weekdays in
-`Asia/Jerusalem`; the separate `IDT` constant used for dates and captions is fixed
-at UTC+3, including winter. Sources: `detect_crossovers`, `scan_stocks`,
-`notify_crossovers`, `run_scheduler`, `main`.
 
 ## Scripts
 

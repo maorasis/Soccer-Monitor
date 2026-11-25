@@ -20,6 +20,8 @@ from aiogram.exceptions import TelegramBadRequest
 
 from config_manager import (
     RuntimeConfig,
+    MAX_ALERT_COOLDOWN_MINUTES,
+    MIN_ALERT_COOLDOWN_MINUTES,
     SUPPORTED_LEAGUES,
     UNDER_ACTIVE_END_HOUR,
     UNDER_ACTIVE_START_HOUR,
@@ -36,6 +38,8 @@ health: Any = None
 allowed_chat_id: Optional[int] = None
 market_snapshot: Any = None
 test_sender: Any = None
+market_fetcher: Callable[[], Awaitable[dict]] | None = None
+rearm_alert: Callable[[str, datetime], int | None] | None = None
 
 # Price thresholds on Polymarket are between 0 and 1
 THRESHOLD_MIN = 0.01
@@ -69,6 +73,7 @@ class BotStates(StatesGroup):
     waiting_for_league_threshold = State()
     waiting_for_under_threshold = State()
     waiting_for_schedule = State()
+    waiting_for_alert_cooldown = State()
 
 def get_main_menu_kb():
     buttons = [
@@ -81,6 +86,7 @@ def get_main_menu_kb():
             [InlineKeyboardButton(text="📋 View Thresholds", callback_data="view_thresholds:0")],
             [InlineKeyboardButton(text="⚽ Live Markets", callback_data="live_markets:0")],
             [InlineKeyboardButton(text="🕒 Monitoring Schedule", callback_data="menu_schedule")],
+            [InlineKeyboardButton(text=f"🔁 Alert Cooldown · {config.alert_cooldown_minutes} min", callback_data="edit_alert_cooldown")],
             [InlineKeyboardButton(text="🔔 Send Test Notification", callback_data="test_notification")],
         ])
     buttons.append([InlineKeyboardButton(text="❌ Close", callback_data="menu_close")])
@@ -226,31 +232,85 @@ async def cb_view_thresholds(callback: CallbackQuery):
 
 @router.callback_query(F.data.regexp(r"^live_markets:\d+$"))
 async def cb_live_markets(callback: CallbackQuery):
-    """Render the last successful poll without making a fresh API request."""
+    """Fetch and render current markets whenever the view is opened or paged."""
     if not config.under_totals:
         await callback.answer("Open /menu to refresh.")
         return
-    snapshot = market_snapshot or {}
+    await callback.answer()
+    try:
+        if market_fetcher is None:
+            raise RuntimeError("Live market fetching is unavailable")
+        snapshot = await market_fetcher()
+    except Exception:
+        logger.exception("Could not refresh live markets")
+        await callback.message.edit_text(
+            "⚽ Live markets\nCould not fetch current markets. Please try again.",
+            reply_markup=paged_kb("live_markets", 0, 0, 6),
+        )
+        return
     markets = [(market, price) for market, price in snapshot.get("markets", []) if market.league in config.active_leagues]
     markets.sort(key=lambda item: (item[0].league, item[0].title, item[0].line))
     size = 6
     page = min(int(callback.data.split(":")[1]), max(0, (len(markets) - 1) // size))
-    if not snapshot.get("at"):
-        text = "⚽ Live markets\nNo successful poll yet. Markets appear here after the next poll."
-    else:
-        at = snapshot["at"].astimezone(ZoneInfo(config.monitor_timezone)).strftime("%Y-%m-%d %H:%M %Z")
-        text = f"⚽ Live markets\nLast successful poll: {at}\nPrices may have changed since then.\n"
-        if not markets:
-            text += "\nNo monitored markets in the latest poll."
-        for market, price in markets[page * size:(page + 1) * size]:
-            ask = f"{price * 100:g}¢" if price is not None else "No ask"
-            limit = config.get_under_threshold(market.league, market.line) * 100
-            text += f"\n\n{market.title}\n{market.league} · Under {market.line}\nAsk: {ask} · Current limit: {limit:g}¢"
-            if market.score:
-                text += f" · Score: {market.score}"
-        text += "\n\nA qualifying price may already have alerted."
+    at = snapshot["at"].astimezone(ZoneInfo(config.monitor_timezone)).strftime("%Y-%m-%d %H:%M %Z")
+    text = f"⚽ Live markets\nFetched: {at}\nPrices may change at any time.\n"
+    if not markets:
+        text += "\nNo monitored live markets found."
+    for market, price in markets[page * size:(page + 1) * size]:
+        ask = f"{price * 100:g}¢" if price is not None else "No ask"
+        limit = config.get_under_threshold(market.league, market.line) * 100
+        text += f"\n\n{market.title}\n{market.league} · Under {market.line}\nAsk: {ask} · Current limit: {limit:g}¢"
+        if market.score:
+            text += f" · Score: {market.score}"
+    text += "\n\nA qualifying price may already have alerted."
     await callback.message.edit_text(text, reply_markup=paged_kb("live_markets", page, len(markets), size))
+
+
+@router.callback_query(F.data.regexp(r"^rearm_alert:[0-9a-f]{32}$"))
+async def cb_rearm_alert(callback: CallbackQuery):
+    if rearm_alert is None:
+        await callback.answer("Rearming is unavailable.", show_alert=True)
+        return
+    button_id = callback.data.split(":", 1)[1]
+    minutes = rearm_alert(button_id, datetime.now(timezone.utc))
+    if minutes is None:
+        await callback.answer("This alert is already rearmed or has been replaced.", show_alert=True)
+        return
+    await callback.answer(f"Rearmed. This line can alert again in {minutes} minutes.", show_alert=True)
+
+
+@router.callback_query(F.data == "edit_alert_cooldown")
+async def cb_edit_alert_cooldown(callback: CallbackQuery, state: FSMContext):
+    if not config.under_totals:
+        await callback.answer("Open /menu to refresh.")
+        return
+    await state.set_state(BotStates.waiting_for_alert_cooldown)
+    await callback.message.edit_text(
+        f"Alert cooldown is currently {config.alert_cooldown_minutes} minutes.\n"
+        f"Enter a whole number from {MIN_ALERT_COOLDOWN_MINUTES} to {MAX_ALERT_COOLDOWN_MINUTES}, or /cancel.\n"
+        "The new delay appears on future alerts."
+    )
     await callback.answer()
+
+
+@router.message(BotStates.waiting_for_alert_cooldown, ~F.text.startswith("/"))
+async def process_alert_cooldown(message: Message, state: FSMContext):
+    try:
+        saved = config.set_alert_cooldown(int(message.text or ""))
+    except ValueError:
+        await message.answer(
+            f"Enter a whole number from {MIN_ALERT_COOLDOWN_MINUTES} to {MAX_ALERT_COOLDOWN_MINUTES}, or /cancel."
+        )
+        return
+    if not saved:
+        await message.answer("Could not save the cooldown. Try again or use /cancel.")
+        return
+    await state.clear()
+    await message.answer(
+        f"Cooldown saved. Future alerts will offer a {config.alert_cooldown_minutes}-minute rearm.",
+        reply_markup=get_main_menu_kb(),
+    )
+
 
 def schedule_text():
     now = datetime.now(timezone.utc)
@@ -509,13 +569,17 @@ async def catch_all_message(message: Message, state: FSMContext):
 
 async def start_bot_polling(bot_token: str, runtime_config: RuntimeConfig,
                             chat_id: Optional[str], api_health: Any = None,
-                            snapshot: Any = None, notification_sender: Any = None):
+                            snapshot: Any = None, notification_sender: Any = None,
+                            live_market_fetcher: Callable[[], Awaitable[dict]] | None = None,
+                            alert_rearmer: Callable[[str, datetime], int | None] | None = None):
     """Initialize shared UI dependencies and poll only when a valid chat ID is set."""
-    global config, allowed_chat_id, health, market_snapshot, test_sender
+    global config, allowed_chat_id, health, market_snapshot, test_sender, market_fetcher, rearm_alert
     config = runtime_config
     health = api_health
     market_snapshot = snapshot
     test_sender = notification_sender
+    market_fetcher = live_market_fetcher
+    rearm_alert = alert_rearmer
     if chat_id:
         try:
             allowed_chat_id = int(chat_id)

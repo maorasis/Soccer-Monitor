@@ -1,7 +1,6 @@
-# Operations Guide: Bots on Oracle Cloud
+# Operations Guide: Soccer Monitor on Oracle Cloud
 
-Setup and day-to-day operation of the [Soccer Monitor Daemon](soccer_monitor.py) and the
-[SMA Crossover Bot](sma_crossover_bot.py) on an Oracle Cloud Always Free VM.
+Setup and day-to-day operation of the [Live Under Monitor](live_under_monitor.py) on an Oracle Cloud Always Free VM.
 
 > ⛔ **Never click "Upgrade to Pay As You Go".** An un-upgraded Always Free account cannot be
 > charged. Oracle takes a temporary ~$1 card hold at signup; that's expected.
@@ -50,8 +49,7 @@ If you get **"Out of host capacity"**: retry in a few hours, or switch the shape
 - **Public IPv4 address assignment**: toggle **ON**. It should be clickable now.
 - **IPv6 address assignment**: leave off.
 
-Leave the default Security List / NSG as-is — no firewall or port changes are needed, since both
-bots only make outbound connections.
+Leave the default Security List / NSG as-is — no firewall or port changes are needed, since the monitor only makes outbound connections.
 
 **Add SSH keys:** paste your public key, or use "Generate a key pair for me" and **download the
 private key before clicking Create**. Without it you cannot SSH in afterward.
@@ -111,13 +109,14 @@ python3 -m venv venv
 
 ### 7. Copy over secrets and state
 
-`.env`, `sma_state.json`, and `config_state.json` are gitignored — `git clone` does not bring them.
+`.env`, `config_state.json`, and `live_under_alerts.sqlite3` are local state — `git clone` does not bring them. Stop the old service before copying the database so its alert history and pending rearms are transferred consistently.
 
-From your laptop, **while the old server is still running**:
+Stop the service on the old server, then copy the files from your laptop:
 
 ```bash
-scp <olduser>@<OLD_IP>:~/soccer_monitor/{.env,sma_state.json,config_state.json} .
-scp .env sma_state.json config_state.json ubuntu@<NEW_IP>:~/soccer_monitor/
+ssh <olduser>@<OLD_IP> sudo systemctl stop soccer_monitor
+scp <olduser>@<OLD_IP>:~/soccer_monitor/{.env,config_state.json,live_under_alerts.sqlite3} .
+scp .env config_state.json live_under_alerts.sqlite3 ubuntu@<NEW_IP>:~/soccer_monitor/
 ```
 
 Starting fresh instead? Create `.env` by hand using `.env.example` as the key list:
@@ -132,17 +131,16 @@ Do this before starting the new one — two instances on the same Telegram token
 
 ```bash
 # on the OLD server
-sudo systemctl stop soccer_monitor sma_crossover_bot
+sudo systemctl stop soccer_monitor
 ```
 
 ### 9. Install the services
 
 ```bash
 sudo cp /home/ubuntu/soccer_monitor/soccer_monitor.service /etc/systemd/system/
-sudo cp /home/ubuntu/soccer_monitor/sma_crossover_bot.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now soccer_monitor sma_crossover_bot
-sudo systemctl status soccer_monitor sma_crossover_bot
+sudo systemctl enable --now soccer_monitor
+sudo systemctl status soccer_monitor
 ```
 
 ### 10. Verify
@@ -152,10 +150,6 @@ journalctl -u soccer_monitor -f -o short-iso        # Minute polls appear during
 ```
 
 Send `/menu` to your Telegram bot and confirm it responds.
-
-```bash
-cd /home/ubuntu/soccer_monitor && ./venv/bin/python sma_crossover_bot.py --dry-run
-```
 
 ### 11. Delete the old GCP project
 
@@ -177,8 +171,6 @@ journalctl -u soccer_monitor -n 100 --no-pager      # last 100 lines
 journalctl -u soccer_monitor -f -o short-iso        # with ISO timestamps
 journalctl -u soccer_monitor -e                     # jump to the end
 ```
-
-Swap in `sma_crossover_bot` for the other bot.
 
 ### Update the code
 
@@ -229,8 +221,7 @@ sudo systemctl restart soccer_monitor
 its timeout and then force-kills it. The unit ends up `failed (Result: timeout)` rather than
 `inactive`. Expected; the process does die.
 
-**Both bots silent for days** — they only speak on a threshold crossing, so check
-`systemctl status` before assuming it was a quiet week.
+**No alerts for days** — check `systemctl status`, the monitoring schedule, enabled leagues, and current limits.
 
 **Instance stopped on its own** — Oracle stops Always Free instances it considers idle. Restart it
 from the console.

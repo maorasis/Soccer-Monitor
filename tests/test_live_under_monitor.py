@@ -3,7 +3,7 @@ import sqlite3
 import sys
 import unittest
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import bot_ui
 from config_manager import RuntimeConfig, SUPPORTED_LEAGUES
-from live_under_monitor import ApiHealth, fetch_live_markets, is_active, poll_once, prepare_alert_history
+from live_under_monitor import ApiHealth, fetch_live_markets, is_active, poll_once, prepare_alert_history, schedule_rearm
 
 
 NOW = datetime(2026, 11, 20, 17, tzinfo=timezone.utc)
@@ -89,6 +89,43 @@ class MarketAPI:
 
 
 class LiveUnderMonitorTests(unittest.TestCase):
+    def test_rearm_waits_and_follows_current_limit_after_restart(self):
+        with TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            history = Path(tmp) / "alerts.sqlite3"
+            config = RuntimeConfig(config_path, under_totals=True)
+            api = MarketAPI()
+            sender = AsyncMock(return_value=True)
+            health = ApiHealth()
+            with closing(sqlite3.connect(history)) as db:
+                prepare_alert_history(db)
+                asyncio.run(poll_once(api, config, db, sender, health, NOW))
+                button = sender.await_args_list[0].kwargs["reply_markup"]["inline_keyboard"][0][0]
+                self.assertEqual(button["text"], "Rearm in 15 min")
+                button_id = button["callback_data"].split(":")[1]
+                self.assertTrue(config.set_alert_cooldown(25))
+                self.assertEqual(schedule_rearm(db, button_id, NOW), 15)
+                self.assertIsNone(schedule_rearm(db, button_id, NOW + timedelta(minutes=1)))
+
+            config = RuntimeConfig(config_path, under_totals=True)
+            self.assertEqual(config.alert_cooldown_minutes, 25)
+            with closing(sqlite3.connect(history)) as db:
+                prepare_alert_history(db)
+                asyncio.run(poll_once(api, config, db, sender, health, NOW + timedelta(minutes=14)))
+                self.assertEqual(sender.await_count, 2)
+                self.assertTrue(config.set_under_threshold("Premier League", 5.5, .79))
+                asyncio.run(poll_once(api, config, db, sender, health, NOW + timedelta(minutes=15)))
+                self.assertEqual(sender.await_count, 2)
+                self.assertTrue(config.set_under_threshold("Premier League", 5.5, .8))
+                sender.side_effect = [False, True]
+                for minute in (16, 17, 18):
+                    asyncio.run(poll_once(api, config, db, sender, health, NOW + timedelta(minutes=minute)))
+                self.assertEqual(sender.await_count, 4)
+                self.assertIn("Under 5.5", sender.await_args.args[0])
+                followup = sender.await_args.kwargs["reply_markup"]["inline_keyboard"][0][0]
+                self.assertEqual(followup["text"], "Rearm in 25 min")
+                self.assertIsNone(schedule_rearm(db, button_id, NOW + timedelta(minutes=19)))
+
     def test_window_follows_israel_local_time(self):
         for month, offset in ((1, 2), (7, 3)):
             self.assertFalse(is_active(datetime(2026, month, 15, 13 - offset, 59, tzinfo=timezone.utc)))

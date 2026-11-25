@@ -569,7 +569,8 @@ class AlertEngine:
         if await self.send_text(message):
             logger.info("Telegram alert sent successfully.")
 
-    async def send_text(self, message: str, *, report_uncertain: bool = False) -> Optional[bool]:
+    async def send_text(self, message: str, *, report_uncertain: bool = False,
+                        reply_markup: Optional[dict] = None) -> Optional[bool]:
         """Send HTML to the configured chat. Optionally return None for uncertain delivery."""
         if not (self.bot_token and self.chat_id):
             logger.info("Telegram credentials not configured. Skipping Telegram notification.")
@@ -582,6 +583,8 @@ class AlertEngine:
                 "text": message,
                 "parse_mode": "HTML"
             }
+            if reply_markup is not None:
+                payload["reply_markup"] = reply_markup
             async with self.session.post(url, json=payload) as response:
                 if response.status != 200:
                     self.health.fail(DEP_TELEGRAM, f"HTTP {response.status}")

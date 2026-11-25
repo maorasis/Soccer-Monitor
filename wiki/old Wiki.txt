@@ -1,0 +1,98 @@
+# ⚽ Soccer Monitor: User Guide
+
+Welcome! This guide explains what the live soccer bot does and how to use its Telegram controls. The bot must already be installed and running, and your Telegram chat must be configured by the person hosting it. For installation, see the [Oracle deployment guide](https://github.com/maorasis/Soccer-Monitor/blob/main/oracle_daemon_guide.md).
+
+## 👀 What the bot does
+
+The bot watches eligible **live soccer matches** from your enabled leagues on Polymarket. Approximately once a minute during your monitoring schedule, it checks the cheapest available offer to sell (the **lowest ask**) for these full-game markets:
+
+| Market | Default alert limit |
+| --- | ---: |
+| Under 5.5 goals | 80¢ |
+| Under 6.5 goals | 85¢ |
+| Under 7.5 goals | 85¢ |
+
+For example, **Under 5.5 goals** means the match ends with five or fewer total goals. If its lowest ask is 80¢ and your limit is 80¢, the bot sends an alert with match details and a link to Polymarket. A market can qualify on its first observation; it does not have to cross the limit while the bot is watching. The bot sends information—it does not place orders or make bets.
+
+**Example alert:** A Premier League match has an Under 5.5 ask of 79¢ and an 80¢ limit. The bot can send a message showing the match, league, line, ask, limit, and a Polymarket link. ⚽
+
+The bot normally alerts once per market token, including across restarts. A sent alert does not mean the price will remain available: prices and order books can change between checks and when you open the link.
+
+## 🚀 Open the control panel
+
+1. Open your configured bot conversation in Telegram.
+2. Send `/start` or `/menu`.
+3. Tap a button to use the control panel. Use **Main menu** or **Back** to return.
+
+While entering a threshold or schedule, send `/cancel` to stop the edit. Only the configured chat can control the bot; ask the host to check the chat ID if it does not respond.
+
+## 🏆 Choose leagues
+
+Tap **Manage Leagues**. Each supported league shows a ✅ when enabled or ❌ when disabled. Tap a league to switch it on or off.
+
+**Example:** Leave Premier League enabled and tap La Liga to disable it. The bot will continue checking Premier League markets, while La Liga markets are excluded. ✅
+
+The bot checks markets in enabled leagues only. Turning a league off does not erase its saved thresholds, so they can be used again when you re-enable it.
+
+## 🎯 Change an alert limit
+
+A threshold is the maximum ask that qualifies for an alert. Enter the value in **cents**, not dollars; for example, enter `80` for 80¢ or `85.5` for 85.5¢. Values must be greater than zero and no more than 100.
+
+### ✏️ Change one league
+
+1. Tap **Edit Thresholds**.
+2. Choose the league, then choose an Under line.
+3. Send the new limit, such as `80`.
+4. Wait for the saved confirmation.
+
+### 🌍 Change one line for all leagues
+
+1. Tap **Edit Thresholds → All leagues**.
+2. Choose the Under line.
+3. Send the new limit and wait for confirmation.
+
+**Example:** Set Under 6.5 to `88`. The limit becomes 88¢ for Under 6.5 in every supported league; Under 5.5 and Under 7.5 keep their existing limits. 🌍
+
+This replaces existing limits for that line across every supported league, including disabled leagues. Other Under lines are unchanged.
+
+### 📋 Check limits
+
+Tap **View Thresholds** to see the effective limit for each league and line. The ✏️ marker indicates a custom setting; unmarked values are defaults. The display also shows whether each league is enabled. Use **Next** and **Previous** to browse the list.
+
+## ⚽ View live markets
+
+Tap **Live Markets** to see eligible matches and Under markets from the last successful poll, along with the last recorded ask and the current limit. **No ask** means no valid sell offer was available in that poll. For example, `Ask: 82¢ · Current limit: 80¢` means the recorded ask was above the limit at that check. 📊
+
+Check the displayed timestamp: the view is a snapshot, not a live price feed, and opening it does not start a new market fetch. A qualifying market may already have alerted. If no successful poll has occurred, the view will say so.
+
+## 🕒 Set monitoring hours
+
+Tap **Monitoring Schedule** to see the current hours and whether the bot is inside its monitoring window. Outside the window, the screen shows the next start. The default is **14:00–23:00, Asia/Jerusalem**.
+
+To change it:
+
+1. Tap **Change schedule**.
+2. Send the start time, end time, and timezone together. For example:
+
+   `14:00 23:00 Asia/Jerusalem`
+
+3. Wait for the saved confirmation. Changes apply on the next poll.
+
+Use 24-hour times and an IANA timezone name, such as `Europe/London`. Start and end must differ. Overnight windows such as `22:00 02:00 Asia/Jerusalem` are supported.
+
+## 🔔 Check status and test delivery
+
+- **Status** shows the active league count, schedule, default limits, custom-limit count, and recorded API health.
+- **Send Test Notification** sends a labeled test message using the alert channel. It does not count as a market alert. The bot reports whether sending succeeded, failed, or was uncertain.
+
+If alerts are missing, check that the server is running, your league is enabled, the schedule is active, and an eligible market has an ask at or below its limit. Check **Live Markets**, its timestamp, and **Status**; the same market may already have alerted. Use the test notification to check delivery.
+
+
+
+## 📚 More information
+
+- [Project README](https://github.com/maorasis/Soccer-Monitor/blob/main/README.md)
+- [Oracle deployment guide](https://github.com/maorasis/Soccer-Monitor/blob/main/oracle_daemon_guide.md)
+- [Soccer monitor technical documentation](Soccer-Monitors)
+
+

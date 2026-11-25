@@ -17,17 +17,16 @@ supported Under lines. `poll_once` fetches CLOB books in batches of 100 tokens;
 `RuntimeConfig.get_under_threshold` (default or league override). The first observed
 ask at or below that limit qualifies, even if the first observation is already low.
 
-Before sending, `poll_once` inserts the token into the SQLite `alerted` table. A
-successful send keeps the claim; an explicit failure removes it for a later retry;
-an uncertain result keeps it. This favors duplicate avoidance when delivery is
-ambiguous, but a crash or ambiguous failure can mean the alert is never delivered.
-The persisted key is the token ID, with no daily expiration in this implementation.
+Before sending, poll_once claims the alert by token in SQLite and saves the
+new message's rearm button. Tapping it schedules one follow-up for that token
+after the delay printed on the button. A scheduled poll sends the follow-up
+if the market is still eligible and the ask meets the current limit. An explicit
+delivery failure releases the first claim or restores the pending rearm for
+retry. Uncertain delivery keeps the claim to avoid duplicate notifications.
 
-The optional UI snapshot is updated after a successful market/book fetch and is
-not persisted. The live-market screen displays that snapshot's timestamp, filters
-out leagues currently disabled, and looks up current thresholds at display time;
-it does not trigger another fetch. A failed poll leaves the earlier snapshot in
-place. Sources: `poll_once`, `bot_ui.py:cb_live_markets`.
+The Live Markets screen fetches eligible markets and order books each time it
+opens or changes page. It shows the fetch time and reads alert limits from the
+current configuration. A failed fetch shows an error.
 
 ## Websocket price dips
 

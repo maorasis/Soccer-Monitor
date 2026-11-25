@@ -50,6 +50,9 @@ DEFAULT_ACTIVE_LEAGUES = [
 UNDER_DEFAULT_THRESHOLDS = {5.5: 0.80, 6.5: 0.85, 7.5: 0.85}
 UNDER_ACTIVE_START_HOUR = 14
 UNDER_ACTIVE_END_HOUR = 23
+DEFAULT_ALERT_COOLDOWN_MINUTES = 15
+MIN_ALERT_COOLDOWN_MINUTES = 2
+MAX_ALERT_COOLDOWN_MINUTES = 1440
 
 class RuntimeConfig:
     """Mutable runtime settings backed by an atomically replaced JSON file.
@@ -72,6 +75,7 @@ class RuntimeConfig:
         self.monitor_end = "23:00"
         self.monitor_timezone = "Asia/Jerusalem"
         
+        self.alert_cooldown_minutes = DEFAULT_ALERT_COOLDOWN_MINUTES
         self.load()
 
     def load(self):
@@ -84,6 +88,9 @@ class RuntimeConfig:
                 self.active_leagues = data.get("active_leagues", self.active_leagues)
                 self.league_thresholds = data.get("league_thresholds", self.league_thresholds)
                 self.under_thresholds = data.get("under_thresholds", {})
+                cooldown = data.get("alert_cooldown_minutes", DEFAULT_ALERT_COOLDOWN_MINUTES)
+                if type(cooldown) is int and MIN_ALERT_COOLDOWN_MINUTES <= cooldown <= MAX_ALERT_COOLDOWN_MINUTES:
+                    self.alert_cooldown_minutes = cooldown
                 schedule = data.get("monitor_schedule", {})
                 try:
                     self._validate_schedule(schedule.get("start", "14:00"), schedule.get("end", "23:00"), schedule.get("timezone", "Asia/Jerusalem"))
@@ -106,6 +113,7 @@ class RuntimeConfig:
             "league_thresholds": self.league_thresholds,
             "monitor_schedule": {"start": getattr(self, "monitor_start", "14:00"), "end": getattr(self, "monitor_end", "23:00"), "timezone": getattr(self, "monitor_timezone", "Asia/Jerusalem")},
         }
+        data["alert_cooldown_minutes"] = getattr(self, "alert_cooldown_minutes", DEFAULT_ALERT_COOLDOWN_MINUTES)
         under_thresholds = getattr(self, "under_thresholds", {})
         if under_thresholds:
             data["under_thresholds"] = under_thresholds
@@ -135,6 +143,16 @@ class RuntimeConfig:
     def get_under_threshold(self, league: str, line: float) -> float:
         """Resolve a league override or the built-in default for a supported line."""
         return self.under_thresholds.get(league, {}).get(str(line), UNDER_DEFAULT_THRESHOLDS[line])
+
+    def set_alert_cooldown(self, minutes: int) -> bool:
+        if type(minutes) is not int or not MIN_ALERT_COOLDOWN_MINUTES <= minutes <= MAX_ALERT_COOLDOWN_MINUTES:
+            raise ValueError("Invalid alert cooldown")
+        previous = self.alert_cooldown_minutes
+        self.alert_cooldown_minutes = minutes
+        if self.save():
+            return True
+        self.alert_cooldown_minutes = previous
+        return False
 
     @staticmethod
     def _validate_schedule(start, end, timezone_name):

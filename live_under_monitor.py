@@ -1,4 +1,4 @@
-"""Poll live full-game Under markets and send at-most-once alerts per token.
+"""Poll live full-game Under markets and send initial and manually rearmed alerts.
 
 The monitor shares configuration, Telegram UI and health reporting with the older
 websocket daemon, but has its own discovery, price checks and SQLite alert history.
@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import partial
 from pathlib import Path
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import aiohttp
@@ -62,8 +63,30 @@ def is_active(now: datetime) -> bool:
 
 
 def prepare_alert_history(db: sqlite3.Connection) -> None:
-    """Create the persistent token claim table without deleting existing claims."""
+    """Create the alert tables without deleting existing claims."""
     db.execute("CREATE TABLE IF NOT EXISTS alerted (token_id TEXT PRIMARY KEY)")
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS alert_rearms (
+            token_id TEXT PRIMARY KEY,
+            button_id TEXT NOT NULL UNIQUE,
+            cooldown_minutes INTEGER NOT NULL,
+            due_at REAL
+        )
+    """)
+
+
+def schedule_rearm(db: sqlite3.Connection, button_id: str, now: datetime) -> int | None:
+    """Schedule the current button once. A superseded button cannot rearm a line."""
+    with db:
+        updated = db.execute("""
+            UPDATE alert_rearms
+            SET due_at = ? + cooldown_minutes * 60
+            WHERE button_id = ? AND due_at IS NULL
+        """, (now.timestamp(), button_id)).rowcount
+        if not updated:
+            return None
+        return db.execute("SELECT cooldown_minutes FROM alert_rearms WHERE button_id = ?",
+                          (button_id,)).fetchone()[0]
 
 
 async def fetch_live_markets(session, config: RuntimeConfig, now: datetime) -> dict[str, UnderMarket]:
@@ -159,6 +182,72 @@ async def poll_once(session, config: RuntimeConfig, db: sqlite3.Connection, send
     releases the claim for retry; uncertain delivery retains it to avoid duplicates.
     Failed discovery/book requests leave the previous successful snapshot intact.
     """
+    try:
+        markets, books = await fetch_market_books(session, config, health, now)
+    except (aiohttp.ClientError, asyncio.TimeoutError, KeyError, TypeError, ValueError):
+        return
+
+    logger.info("Polled %d live Under markets, received %d order books", len(markets), len(books))
+    if snapshot is not None:
+        snapshot["at"] = now
+        snapshot["markets"] = [(market, lowest_ask(books.get(token, {}))) for token, market in markets.items()]
+    for token, market in markets.items():
+        if market.league not in config.active_leagues:
+            continue
+        price = lowest_ask(books.get(token, {}))
+        threshold = config.get_under_threshold(market.league, market.line)
+        if price is None or price > threshold:
+            continue
+
+        # Commit the claim and rotate the button before sending. An ambiguous
+        # delivery keeps the claim, since Telegram may already have sent it.
+        button_id = uuid4().hex
+        cooldown = config.alert_cooldown_minutes
+        with db:
+            first_alert = db.execute("INSERT OR IGNORE INTO alerted VALUES (?)", (token,)).rowcount
+            previous_rearm = None
+            if not first_alert:
+                previous_rearm = db.execute("""
+                    SELECT button_id, cooldown_minutes, due_at FROM alert_rearms
+                    WHERE token_id = ? AND due_at <= ?
+                """, (token, now.timestamp())).fetchone()
+                if previous_rearm is None:
+                    continue
+            db.execute("INSERT OR REPLACE INTO alert_rearms VALUES (?, ?, ?, NULL)",
+                       (token, button_id, cooldown))
+
+        message = (
+            f"🚨 <b>LIVE UNDER PRICE ALERT</b>\n\n"
+            f"⚽ <b>{html.escape(market.title)}</b>\n"
+            f"🏆 {html.escape(market.league)}\n"
+            f"📊 Full game · Under {market.line:g} goals\n"
+            f"💰 Lowest ask: {price * 100:g}¢ · Limit: {threshold * 100:g}¢\n"
+        )
+        if market.score:
+            message += f"🎯 Score: {html.escape(market.score)}\n"
+        message += f"🔗 https://polymarket.com/event/{html.escape(market.slug)}"
+        markup = {"inline_keyboard": [[{
+            "text": f"Rearm in {cooldown} min",
+            "callback_data": f"rearm_alert:{button_id}",
+        }]]}
+        delivered = await send_text(message, reply_markup=markup)
+        if delivered:
+            logger.info("Alert sent for %s, Under %g at %g¢", market.title, market.line, price * 100)
+        elif delivered is False:
+            with db:
+                if previous_rearm is None:
+                    db.execute("DELETE FROM alert_rearms WHERE token_id = ?", (token,))
+                    db.execute("DELETE FROM alerted WHERE token_id = ?", (token,))
+                else:
+                    db.execute("UPDATE alert_rearms SET button_id = ?, cooldown_minutes = ?, due_at = ? WHERE token_id = ?",
+                               (*previous_rearm, token))
+        else:
+            logger.warning("Uncertain Telegram delivery for %s, Under %g. Alert will be skipped on future polls.",
+                           market.title, market.line)
+
+
+async def fetch_market_books(session, config, health, now):
+    """Fetch complete market discovery and order books, or raise on failure."""
     dependency = DEP_GAMMA
     try:
         markets = await fetch_live_markets(session, config, now)
@@ -178,46 +267,16 @@ async def poll_once(session, config: RuntimeConfig, db: sqlite3.Connection, send
         detail = f"{type(exc).__name__}: {exc}"
         logger.error("%s poll failed: %s", dependency, detail,
                      extra=health.fail(dependency, detail, exc=exc))
-        return
+        raise
+    return markets, books
 
-    logger.info("Polled %d live Under markets, received %d order books", len(markets), len(books))
-    if snapshot is not None:
-        snapshot["at"] = now
-        snapshot["markets"] = [(market, lowest_ask(books.get(token, {}))) for token, market in markets.items()]
-    for token, market in markets.items():
-        if market.league not in config.active_leagues:
-            continue
-        price = lowest_ask(books.get(token, {}))
-        threshold = config.get_under_threshold(market.league, market.line)
-        if price is None or price > threshold:
-            continue
 
-        # Telegram has no idempotency key. Commit the token claim before sending to prevent a
-        # restart or an ambiguous network failure from sending a second alert.
-        with db:
-            claimed = db.execute("INSERT OR IGNORE INTO alerted VALUES (?)", (token,)).rowcount
-        if not claimed:
-            continue
-
-        message = (
-            f"🚨 <b>LIVE UNDER PRICE ALERT</b>\n\n"
-            f"⚽ <b>{html.escape(market.title)}</b>\n"
-            f"🏆 {html.escape(market.league)}\n"
-            f"📊 Full game · Under {market.line:g} goals\n"
-            f"💰 Lowest ask: {price * 100:g}¢ · Limit: {threshold * 100:g}¢\n"
-        )
-        if market.score:
-            message += f"🎯 Score: {html.escape(market.score)}\n"
-        message += f"🔗 https://polymarket.com/event/{html.escape(market.slug)}"
-        delivered = await send_text(message)
-        if delivered:
-            logger.info("Alert sent for %s, Under %g at %g¢", market.title, market.line, price * 100)
-        elif delivered is False:
-            with db:
-                db.execute("DELETE FROM alerted WHERE token_id = ?", (token,))
-        else:
-            logger.warning("Uncertain Telegram delivery for %s, Under %g. Alert will be skipped on future polls.",
-                           market.title, market.line)
+async def fetch_ui_markets(session, config, health):
+    now = datetime.now(timezone.utc)
+    markets, books = await fetch_market_books(session, config, health, now)
+    return {"at": datetime.now(timezone.utc), "markets": [
+        (market, lowest_ask(books.get(token, {}))) for token, market in markets.items()
+    ]}
 
 
 async def run_polls(session, config, db, send_text, health, snapshot=None):
@@ -255,11 +314,17 @@ async def main():
         prepare_alert_history(db)
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
             alerts = AlertEngine(session, health)
+            send_alert = partial(alerts.send_text, report_uncertain=True)
             snapshot = {}
             tasks = asyncio.gather(
-                run_polls(session, config, db, partial(alerts.send_text, report_uncertain=True), health, snapshot),
+                run_polls(session, config, db, send_alert, health, snapshot),
                 error_alert_loop(alerts, error_queue),
-                start_bot_polling(TELEGRAM_BOT_TOKEN, config, TELEGRAM_CHAT_ID, health, snapshot, partial(alerts.send_text, report_uncertain=True)),
+                start_bot_polling(
+                    TELEGRAM_BOT_TOKEN, config, TELEGRAM_CHAT_ID, health, snapshot,
+                    notification_sender=send_alert,
+                    live_market_fetcher=partial(fetch_ui_markets, session, config, health),
+                    alert_rearmer=partial(schedule_rearm, db),
+                ),
             )
             loop = asyncio.get_running_loop()
             for sig in (signal.SIGTERM, signal.SIGINT):

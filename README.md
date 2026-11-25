@@ -1,4 +1,4 @@
-# Polymarket Live Soccer Under Monitor
+# Football_Under_Monitor
 
 For maintainers, see the [developer documentation](docs/README.md), including
 the separate websocket soccer monitor and helper scripts.

@@ -1,4 +1,4 @@
-# Developer documentation
+# Football_Under_Monitor developer documentation
 
 Verified against the working tree on 2026-11-22. Links point to source files so
 that contracts can be checked against the implementation.

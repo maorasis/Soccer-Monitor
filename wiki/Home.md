@@ -1,4 +1,4 @@
-# ⚽ Soccer Monitor Wiki
+# ⚽ Football_Under_Monitor Wiki
 
 Welcome! This guide explains what the live soccer bot does and how to use its Telegram controls. The bot must already be installed and running, and your Telegram chat must be configured by the person hosting it. For installation, see the [Oracle deployment guide](https://github.com/maorasis/Soccer-Monitor/blob/main/oracle_daemon_guide.md).
 

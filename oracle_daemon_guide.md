@@ -1,4 +1,4 @@
-# Operations Guide: Soccer Monitor on Oracle Cloud
+# Operations Guide: Football_Under_Monitor on Oracle Cloud
 
 Setup and day-to-day operation of the [Live Under Monitor](live_under_monitor.py) on an Oracle Cloud Always Free VM.
 

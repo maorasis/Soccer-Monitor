@@ -4,7 +4,7 @@ Welcome! This guide explains what the live soccer bot does and how to use its Te
 
 ## 👀 What the bot does
 
-The bot watches eligible **live soccer matches** from your enabled leagues on Polymarket. Approximately once a minute during your monitoring schedule, it checks the cheapest available offer to sell (the **lowest ask**) for these full-game markets:
+The bot watches eligible **live soccer matches** from your enabled leagues on Polymarket. Approximately every 15 seconds during your monitoring schedule, it checks the cheapest available offer to sell (the **lowest ask**) for these full-game markets:
 
 | Market | Default alert limit |
 | --- | ---: |
@@ -156,7 +156,7 @@ Verified against the working tree on 2026-11-22.
 
 [`live_under_monitor.py`](https://github.com/maorasis/Soccer-Monitor/blob/main/live_under_monitor.py) composes `RuntimeConfig`, a
 shared HTTP session, SQLite alert history, `ApiHealth`, error delivery, and the
-Telegram panel in `main`. `run_polls` checks the saved schedule at minute
+Telegram panel in `main`. `run_polls` checks the saved schedule at 15-second
 boundaries. The daily start and end are interpreted in the configured IANA time
 zone, with an end earlier than the start representing an overnight window.
 

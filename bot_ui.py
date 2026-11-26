@@ -200,7 +200,7 @@ async def cb_menu_status(callback: CallbackQuery):
         defaults = ", ".join(f"Under {line}: {price * 100:g}¢" for line, price in UNDER_DEFAULT_THRESHOLDS.items())
         overrides = sum(len(prices) for prices in config.under_thresholds.values())
         hours = f"{config.monitor_start}–{config.monitor_end} ({config.monitor_timezone})"
-        text += f"Polling: every minute, {hours}\nDefault limits: {defaults}\nCustom limits: {overrides}"
+        text += f"Polling: every 15 seconds, {hours}\nDefault limits: {defaults}\nCustom limits: {overrides}"
     else:
         text += f"Global Threshold: {config.global_threshold:.3f}\nCustom Thresholds: {len(config.league_thresholds)}"
     if health is not None:

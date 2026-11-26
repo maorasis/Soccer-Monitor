@@ -42,6 +42,7 @@ EVENTS_URL = "https://gamma-api.polymarket.com/events/keyset"
 BOOKS_URL = "https://clob.polymarket.com/books"
 DEP_BOOKS = "Polymarket order books"
 MAX_MATCH_AGE = timedelta(hours=4)
+POLL_INTERVAL_SECONDS = 15
 
 
 @dataclass(frozen=True)
@@ -280,7 +281,7 @@ async def fetch_ui_markets(session, config, health):
 
 
 async def run_polls(session, config, db, send_text, health, snapshot=None):
-    """Poll on minute boundaries inside the saved local-time monitoring window."""
+    """Poll on POLL_INTERVAL_SECONDS boundaries inside the saved local-time monitoring window."""
     while True:
         now = datetime.now(ISRAEL_TZ)
         if config.monitoring_active(now):
@@ -294,7 +295,7 @@ async def run_polls(session, config, db, send_text, health, snapshot=None):
                 await asyncio.wait_for(poll_once(session, config, db, send_text, health, now, snapshot), max(0, seconds))
             except asyncio.TimeoutError:
                 logger.info("Polling window closed during the final poll")
-        await asyncio.sleep(60 - time.time() % 60)
+        await asyncio.sleep(POLL_INTERVAL_SECONDS - time.time() % POLL_INTERVAL_SECONDS)
 
 
 async def main():

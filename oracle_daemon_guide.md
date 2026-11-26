@@ -146,7 +146,7 @@ sudo systemctl status soccer_monitor
 ### 10. Verify
 
 ```bash
-journalctl -u soccer_monitor -f -o short-iso        # Minute polls appear during active hours
+journalctl -u soccer_monitor -f -o short-iso        # 15-second polls appear during active hours
 ```
 
 Send `/menu` to your Telegram bot and confirm it responds.

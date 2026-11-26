@@ -3,7 +3,7 @@
 For maintainers, see the [developer documentation](docs/README.md), including
 the separate websocket soccer monitor and helper scripts.
 
-`live_under_monitor.py` polls Polymarket once a minute during its configured daily window, which defaults to 14:00 up to 23:00 Israel local time. It looks for the lowest ask, the cheapest offer to sell, on these full-game Under markets in live matches from the enabled leagues.
+`live_under_monitor.py` polls Polymarket every 15 seconds during its configured daily window, which defaults to 14:00 up to 23:00 Israel local time. It looks for the lowest ask, the cheapest offer to sell, on these full-game Under markets in live matches from the enabled leagues.
 
 | Full-game total | Default alert limit |
 | --- | ---: |

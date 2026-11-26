@@ -6,7 +6,7 @@ Verified against the working tree on 2026-11-22.
 
 [`live_under_monitor.py`](../live_under_monitor.py) composes `RuntimeConfig`, a
 shared HTTP session, SQLite alert history, `ApiHealth`, error delivery, and the
-Telegram panel in `main`. `run_polls` checks the saved schedule at minute
+Telegram panel in `main`. `run_polls` checks the saved schedule at 15-second
 boundaries. The daily start and end are interpreted in the configured IANA time
 zone, with an end earlier than the start representing an overnight window.
 

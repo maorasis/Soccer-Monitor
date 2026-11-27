@@ -5,7 +5,7 @@ that contracts can be checked against the implementation.
 
 - [System overview](overview.md): entry points, dependencies, shared state, and deployment.
 - [Soccer monitors](soccer-monitors.md): polling and websocket alert flows, and their different delivery semantics.
-- [Helper scripts](stock-and-tools.md): maintenance and analysis scripts.
+- [Helper scripts](stock-and-tools.md): soccer maintenance and analysis scripts. Stock tools are documented in [the SMA bot](../../sma_bot/README.md).
 - [Operator setup](../README.md) and [VM deployment guide](../oracle_daemon_guide.md).
 
 The checked-in service configuration is evidence of deployment configuration,

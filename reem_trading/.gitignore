@@ -1,0 +1,3 @@
+copy_state.sqlite3*
+copy_bot.lock
+.credential-setup-*

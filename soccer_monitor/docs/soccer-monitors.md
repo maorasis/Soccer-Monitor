@@ -26,7 +26,9 @@ retry. Uncertain delivery keeps the claim to avoid duplicate notifications.
 
 The Live Markets screen fetches eligible markets and order books each time it
 opens or changes page. It shows the fetch time and reads alert limits from the
-current configuration. A failed fetch shows an error.
+current configuration. Only enabled leagues with active games and valid asks at
+or below the league-and-line limit appear; missing asks and above-limit markets
+are hidden. A failed fetch shows an error.
 
 ## Websocket price dips
 

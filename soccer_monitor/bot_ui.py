@@ -248,14 +248,16 @@ async def cb_live_markets(callback: CallbackQuery):
             reply_markup=paged_kb("live_markets", 0, 0, 6),
         )
         return
-    markets = [(market, price) for market, price in snapshot.get("markets", []) if market.league in config.active_leagues]
+    markets = [(market, price) for market, price in snapshot.get("markets", [])
+               if market.league in config.active_leagues and price is not None
+               and 0 < price <= config.get_under_threshold(market.league, market.line)]
     markets.sort(key=lambda item: (item[0].league, item[0].title, item[0].line))
     size = 6
     page = min(int(callback.data.split(":")[1]), max(0, (len(markets) - 1) // size))
     at = snapshot["at"].astimezone(ZoneInfo(config.monitor_timezone)).strftime("%Y-%m-%d %H:%M %Z")
     text = f"⚽ Live markets\nFetched: {at}\nPrices may change at any time.\n"
     if not markets:
-        text += "\nNo monitored live markets found."
+        text += "\nNo live markets at or below your limits in enabled leagues."
     for market, price in markets[page * size:(page + 1) * size]:
         ask = f"{price * 100:g}¢" if price is not None else "No ask"
         limit = config.get_under_threshold(market.league, market.line) * 100

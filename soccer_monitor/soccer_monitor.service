@@ -9,7 +9,7 @@ User=ubuntu
 Group=ubuntu
 
 # Paths match the Oracle Cloud Ubuntu image default user
-WorkingDirectory=/home/ubuntu/soccer_monitor
+WorkingDirectory=/home/ubuntu/soccer_monitor/soccer_monitor
 ExecStart=/home/ubuntu/soccer_monitor/venv/bin/python live_under_monitor.py
 
 Restart=on-failure

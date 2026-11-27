@@ -2,7 +2,7 @@
 
 Verified against the working tree on 2026-11-22.
 
-The repository contains separate Python entry points, not one combined daemon:
+The soccer folder contains separate Python entry points, not one combined daemon:
 
 | Entry point | Responsibility | External systems |
 |---|---|---|
@@ -43,8 +43,8 @@ independent simultaneous polling consumers.
 
 ## Execution and deployment
 
-Dependencies and Python compatibility are declared in [pyproject.toml](../pyproject.toml),
-with resolved versions in [uv.lock](../uv.lock). The checked-in
+Dependencies and Python compatibility are declared in [pyproject.toml](../../pyproject.toml),
+with resolved versions in [uv.lock](../../uv.lock). The checked-in
 [`soccer_monitor.service`](../soccer_monitor.service) starts the live-Under entry
 point. See the [deployment guide](../oracle_daemon_guide.md) for the checked-in
 operational instructions. Actual deployed versions and process topology are unknown.

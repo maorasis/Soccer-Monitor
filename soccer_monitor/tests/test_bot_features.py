@@ -47,14 +47,40 @@ class BotFeatureTests(unittest.TestCase):
             asyncio.run(poll_once(MarketAPI(), self.config, db, AsyncMock(return_value=True), ApiHealth(), NOW, snapshot))
         self.assertEqual(snapshot["at"], NOW)
         bot_ui.market_fetcher = AsyncMock(return_value=snapshot)
-        self.config.set_under_threshold("Premier League", 5.5, .77)
+        self.config.set_under_threshold("Premier League", 5.5, .81)
         callback = self.callback("live_markets:0")
         asyncio.run(bot_ui.cb_live_markets(callback))
         text = callback.message.edit_text.await_args.args[0]
-        self.assertIn("Ask: 80¢ · Current limit: 77¢", text)
-        self.assertIn("No ask", text)
+        self.assertIn("Ask: 80¢ · Current limit: 81¢", text)
+        self.assertNotIn("No ask", text)
         self.assertIn("Fetched:", text)
         bot_ui.market_fetcher.assert_awaited_once()
+
+    def test_live_view_only_shows_enabled_leagues_at_or_below_each_limit(self):
+        self.config.active_leagues = ["Premier League"]
+        self.config.set_under_threshold("Premier League", 5.5, .77)
+        rows = [
+            (UnderMarket("Premier League", 5.5, "Below limit", "below", ""), .76),
+            (UnderMarket("Premier League", 5.5, "At limit", "equal", ""), .77),
+            (UnderMarket("Premier League", 5.5, "Above limit", "above", ""), .78),
+            (UnderMarket("Premier League", 6.5, "Other line above", "six", ""), .86),
+            (UnderMarket("Premier League", 5.5, "Missing ask", "missing", ""), None),
+            (UnderMarket("Premier League", 5.5, "Invalid ask", "invalid", ""), 0),
+            (UnderMarket("La Liga", 5.5, "Disabled league", "disabled", ""), .50),
+        ]
+        bot_ui.market_fetcher = AsyncMock(return_value={"at": NOW, "markets": rows})
+        callback = self.callback("live_markets:9")
+        asyncio.run(bot_ui.cb_live_markets(callback))
+        text = callback.message.edit_text.await_args.args[0]
+        for title in ("Below limit", "At limit"):
+            self.assertIn(title, text)
+        for title in ("Above limit", "Other line above", "Missing ask", "Invalid ask", "Disabled league"):
+            self.assertNotIn(title, text)
+        self.config.set_under_threshold("Premier League", 5.5, .75)
+        asyncio.run(bot_ui.cb_live_markets(callback))
+        text = callback.message.edit_text.await_args.args[0]
+        self.assertIn("No live markets at or below your limits in enabled leagues.", text)
+        self.assertNotIn("Below limit", text)
 
     def test_live_view_fetches_on_each_use_and_reports_failures(self):
         market = UnderMarket("Premier League", 5.5, "Match", "match", "")

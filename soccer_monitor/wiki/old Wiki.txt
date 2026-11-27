@@ -1,6 +1,6 @@
 # ⚽ Soccer Monitor: User Guide
 
-Welcome! This guide explains what the live soccer bot does and how to use its Telegram controls. The bot must already be installed and running, and your Telegram chat must be configured by the person hosting it. For installation, see the [Oracle deployment guide](https://github.com/maorasis/Soccer-Monitor/blob/main/oracle_daemon_guide.md).
+Welcome! This guide explains what the live soccer bot does and how to use its Telegram controls. The bot must already be installed and running, and your Telegram chat must be configured by the person hosting it. For installation, see the [Oracle deployment guide](https://github.com/maorasis/Soccer-Monitor/blob/main/soccer_monitor/oracle_daemon_guide.md).
 
 ## 👀 What the bot does
 
@@ -91,8 +91,8 @@ If alerts are missing, check that the server is running, your league is enabled,
 
 ## 📚 More information
 
-- [Project README](https://github.com/maorasis/Soccer-Monitor/blob/main/README.md)
-- [Oracle deployment guide](https://github.com/maorasis/Soccer-Monitor/blob/main/oracle_daemon_guide.md)
+- [Project README](https://github.com/maorasis/Soccer-Monitor/blob/main/soccer_monitor/README.md)
+- [Oracle deployment guide](https://github.com/maorasis/Soccer-Monitor/blob/main/soccer_monitor/oracle_daemon_guide.md)
 - [Soccer monitor technical documentation](Soccer-Monitors)
 
 

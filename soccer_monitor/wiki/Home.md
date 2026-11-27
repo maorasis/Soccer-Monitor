@@ -1,6 +1,6 @@
 # ⚽ Football_Under_Monitor Wiki
 
-Welcome! This guide explains what the live soccer bot does and how to use its Telegram controls. The bot must already be installed and running, and your Telegram chat must be configured by the person hosting it. For installation, see the [Oracle deployment guide](https://github.com/maorasis/Soccer-Monitor/blob/main/oracle_daemon_guide.md).
+Welcome! This guide explains what the live soccer bot does and how to use its Telegram controls. The bot must already be installed and running, and your Telegram chat must be configured by the person hosting it. For installation, see the [Oracle deployment guide](https://github.com/maorasis/Soccer-Monitor/blob/main/soccer_monitor/oracle_daemon_guide.md).
 
 ## 👀 What the bot does
 
@@ -61,7 +61,7 @@ Tap **View Thresholds** to see the effective limit for each league and line. The
 
 ## ⚽ View live markets
 
-Tap **Live Markets** to fetch eligible live matches, Under markets and their latest lowest asks. The screen shows the current limit and fetch time. **No ask** means no valid sell offer was returned. For example, `Ask: 82¢ · Current limit: 80¢` means the ask was above the limit when fetched.
+Tap **Live Markets** to fetch active games in your enabled leagues. Only Under markets with a valid lowest ask **at or below the current limit for that league and line** appear. Markets above the limit or without an ask are hidden. For example, with an 80¢ limit, a market at 79¢ or 80¢ appears; one at 82¢ does not. The screen shows the current limit and fetch time.
 
 Opening the view or changing pages fetches again, even outside monitoring hours. Prices can change after the fetch. Opening the view does not send alerts; a qualifying market may already have alerted. If fetching fails, the bot displays an error.
 
@@ -101,11 +101,11 @@ The repository contains separate Python entry points, not one combined daemon:
 
 | Entry point | Responsibility | External systems |
 |---|---|---|
-| [`live_under_monitor.py`](https://github.com/maorasis/Soccer-Monitor/blob/main/live_under_monitor.py) | Poll live full-game Under markets, compare asks with per-league limits, and send alerts. | Polymarket Gamma and CLOB HTTP APIs; Telegram |
-| [`soccer_monitor.py`](https://github.com/maorasis/Soccer-Monitor/blob/main/soccer_monitor.py) | Discover soccer markets and detect downward ask crossings from websocket books. | API-Football, Polymarket Gamma and CLOB websocket, Telegram |
+| [`live_under_monitor.py`](https://github.com/maorasis/Soccer-Monitor/blob/main/soccer_monitor/live_under_monitor.py) | Poll live full-game Under markets, compare asks with per-league limits, and send alerts. | Polymarket Gamma and CLOB HTTP APIs; Telegram |
+| [`soccer_monitor.py`](https://github.com/maorasis/Soccer-Monitor/blob/main/soccer_monitor/soccer_monitor.py) | Discover soccer markets and detect downward ask crossings from websocket books. | API-Football, Polymarket Gamma and CLOB websocket, Telegram |
 
-The two soccer implementations share [`bot_ui.py`](https://github.com/maorasis/Soccer-Monitor/blob/main/bot_ui.py),
-[`config_manager.py`](https://github.com/maorasis/Soccer-Monitor/blob/main/config_manager.py), and health, error, title parsing and
+The two soccer implementations share [`bot_ui.py`](https://github.com/maorasis/Soccer-Monitor/blob/main/soccer_monitor/bot_ui.py),
+[`config_manager.py`](https://github.com/maorasis/Soccer-Monitor/blob/main/soccer_monitor/config_manager.py), and health, error, title parsing and
 Telegram helpers in `soccer_monitor.py`. `RuntimeConfig(under_totals=True)` selects
 the live-Under control-panel behavior. See the technical sections below.
 
@@ -116,7 +116,7 @@ the live-Under control-panel behavior. See the technical sections below.
   global/league thresholds, per-league Under limits, alert cooldown, and polling schedule are
   held in memory. The Under limit and schedule setters restore their previous
   in-memory values if saving fails. The file is not watched for external edits.
-  Source: [`config_manager.py`](https://github.com/maorasis/Soccer-Monitor/blob/main/config_manager.py), `RuntimeConfig`.
+  Source: [`config_manager.py`](https://github.com/maorasis/Soccer-Monitor/blob/main/soccer_monitor/config_manager.py), `RuntimeConfig`.
 - The live-Under daemon records claimed token IDs and scheduled rearms in `live_under_alerts.sqlite3`
   beside the config file. The websocket daemon tracks token alerts in memory and
   clears that history on the Israel-local date change. Their alert behavior is
@@ -139,12 +139,12 @@ independent simultaneous polling consumers.
 
 Dependencies and Python compatibility are declared in [pyproject.toml](https://github.com/maorasis/Soccer-Monitor/blob/main/pyproject.toml),
 with resolved versions in [uv.lock](https://github.com/maorasis/Soccer-Monitor/blob/main/uv.lock). The checked-in
-[`soccer_monitor.service`](https://github.com/maorasis/Soccer-Monitor/blob/main/soccer_monitor.service) starts the live-Under entry
-point. See the [deployment guide](https://github.com/maorasis/Soccer-Monitor/blob/main/oracle_daemon_guide.md) for the checked-in
+[`soccer_monitor.service`](https://github.com/maorasis/Soccer-Monitor/blob/main/soccer_monitor/soccer_monitor.service) starts the live-Under entry
+point. See the [deployment guide](https://github.com/maorasis/Soccer-Monitor/blob/main/soccer_monitor/oracle_daemon_guide.md) for the checked-in
 operational instructions. Actual deployed versions and process topology are unknown.
 
 Tests are a mixture of `unittest` classes and standalone Python scripts under
-[`tests/`](https://github.com/maorasis/Soccer-Monitor/tree/main/tests/). Some scripts perform real network calls or send messages;
+[`tests/`](https://github.com/maorasis/Soccer-Monitor/tree/main/soccer_monitor/tests/). Some scripts perform real network calls or send messages;
 read their module docstrings and setup before running them. In particular,
 `test_threshold_alert.py` explicitly sends a real Telegram message.
 
@@ -154,7 +154,7 @@ Verified against the working tree on 2026-11-22.
 
 ### Live Under polling
 
-[`live_under_monitor.py`](https://github.com/maorasis/Soccer-Monitor/blob/main/live_under_monitor.py) composes `RuntimeConfig`, a
+[`live_under_monitor.py`](https://github.com/maorasis/Soccer-Monitor/blob/main/soccer_monitor/live_under_monitor.py) composes `RuntimeConfig`, a
 shared HTTP session, SQLite alert history, `ApiHealth`, error delivery, and the
 Telegram panel in `main`. `run_polls` checks the saved schedule at 15-second
 boundaries. The daily start and end are interpreted in the configured IANA time
@@ -175,11 +175,11 @@ The persisted key is the token ID, with no daily expiration in this implementati
 
 Each alert carries a unique rearm button with the cooldown configured at send time. `schedule_rearm` records a deadline once per button in `alert_rearms`. On a scheduled poll after the deadline, `poll_once` sends a follow-up only if the market is still eligible and its current ask is at or below the current threshold. It rotates the button before sending; an explicit delivery failure restores the pending rearm, while uncertain delivery retains the claim. The next alert uses the then-current cooldown. SQLite preserves pending rearms across restarts. Sources: `live_under_monitor.py:prepare_alert_history`, `schedule_rearm`, `poll_once`; `config_manager.py:RuntimeConfig.set_alert_cooldown`.
 
-The Live Markets screen independently fetches eligible markets and books on every open or page change, regardless of the monitoring schedule. It displays the fetch time and current thresholds, and reports a fetch failure. This read does not send market alerts. Sources: `live_under_monitor.py:fetch_ui_markets`, `fetch_market_books`; `bot_ui.py:cb_live_markets`.
+The Live Markets screen independently fetches eligible markets and books on every open or page change, regardless of the monitoring schedule. It displays only markets in enabled leagues with a valid ask at or below their current thresholds, shows the fetch time, and reports a fetch failure. This read does not send market alerts. Sources: `live_under_monitor.py:fetch_ui_markets`, `fetch_market_books`; `bot_ui.py:cb_live_markets`.
 
 ### Websocket price dips
 
-[`soccer_monitor.py`](https://github.com/maorasis/Soccer-Monitor/blob/main/soccer_monitor.py) composes `LiveMatchTracker`,
+[`soccer_monitor.py`](https://github.com/maorasis/Soccer-Monitor/blob/main/soccer_monitor/soccer_monitor.py) composes `LiveMatchTracker`,
 `MarketDiscovery`, `OrderBookMonitor`, and `AlertEngine` in `main`. The tracker
 fetches fixtures for today and tomorrow, retains a global fixture cache, and
 filters it against enabled leagues on read. Discovery scans Gamma and matches
@@ -201,7 +201,7 @@ do not require a new subscription. Source: `OrderBookMonitor`.
 
 ### Control panel and health
 
-[`bot_ui.py`](https://github.com/maorasis/Soccer-Monitor/blob/main/bot_ui.py) authenticates both messages and callbacks using the
+[`bot_ui.py`](https://github.com/maorasis/Soccer-Monitor/blob/main/soccer_monitor/bot_ui.py) authenticates both messages and callbacks using the
 configured Telegram chat ID. `start_bot_polling` refuses to start if the ID is
 missing or invalid. Aiogram states hold pending threshold, schedule and alert cooldown inputs;
 `/cancel` clears the active edit. Under prices are entered in cents, converted
@@ -220,14 +220,14 @@ Verified against the working tree on 2026-11-22.
 
 | Script | Behavior and side effects |
 |---|---|
-| [`team_mapper.py`](https://github.com/maorasis/Soccer-Monitor/blob/main/scripts/team_mapper.py) | Fetches supported-league teams using the hard-coded 2024 API-Football season, extracts Polymarket names, automatically matches exact/normalized names, prompts for unresolved names, and writes `team_mapping.json` in the working directory. `fetch_polymarket_teams_sync` is an unimplemented stub. |
-| [`check_prefixes.py`](https://github.com/maorasis/Soccer-Monitor/blob/main/scripts/check_prefixes.py) | Reads `team_mapping.json` in the working directory and prints colon-prefixed keys that lack a standalone equivalent. |
-| [`fetch_and_plot_trades.py`](https://github.com/maorasis/Soccer-Monitor/blob/main/scripts/fetch_and_plot_trades.py) | Finds the configured Gamma market, fetches first-token price history and writes a CSV and plot in the working directory. Its `1 - price` second series is a calculated complement, not a separately fetched order book. |
+| [`team_mapper.py`](https://github.com/maorasis/Soccer-Monitor/blob/main/soccer_monitor/scripts/team_mapper.py) | Fetches supported-league teams using the hard-coded 2024 API-Football season, extracts Polymarket names, automatically matches exact/normalized names, prompts for unresolved names, and writes `team_mapping.json` in the working directory. `fetch_polymarket_teams_sync` is an unimplemented stub. |
+| [`check_prefixes.py`](https://github.com/maorasis/Soccer-Monitor/blob/main/soccer_monitor/scripts/check_prefixes.py) | Reads `team_mapping.json` in the working directory and prints colon-prefixed keys that lack a standalone equivalent. |
+| [`fetch_and_plot_trades.py`](https://github.com/maorasis/Soccer-Monitor/blob/main/soccer_monitor/scripts/fetch_and_plot_trades.py) | Finds the configured Gamma market, fetches first-token price history and writes a CSV and plot in the working directory. Its `1 - price` second series is a calculated complement, not a separately fetched order book. |
 
 These scripts can call external services, and some write files or prompt for input.
 Inspect their constants and working directory before running them.
 
 ## More information
 
-- [Project README](https://github.com/maorasis/Soccer-Monitor/blob/main/README.md)
-- [Oracle deployment guide](https://github.com/maorasis/Soccer-Monitor/blob/main/oracle_daemon_guide.md)
+- [Project README](https://github.com/maorasis/Soccer-Monitor/blob/main/soccer_monitor/README.md)
+- [Oracle deployment guide](https://github.com/maorasis/Soccer-Monitor/blob/main/soccer_monitor/oracle_daemon_guide.md)

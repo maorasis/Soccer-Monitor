@@ -1,0 +1,19 @@
+[Unit]
+Description=Reem Polymarket Copy Trading Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/soccer_monitor/reem_trading
+ExecStart=/home/ubuntu/soccer_monitor/reem_trading/.venv/bin/python copy_bot.py --live
+# Uncertain or rejected orders need reconciliation rather than an automatic replay.
+Restart=no
+Environment=PYTHONUNBUFFERED=1
+UMask=0077
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target

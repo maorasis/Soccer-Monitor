@@ -109,20 +109,20 @@ python3 -m venv venv
 
 ### 7. Copy over secrets and state
 
-`.env`, `config_state.json`, and `live_under_alerts.sqlite3` are local state — `git clone` does not bring them. Stop the old service before copying the database so its alert history and pending rearms are transferred consistently.
+`soccer_monitor/.env`, `soccer_monitor/config_state.json`, and `soccer_monitor/live_under_alerts.sqlite3` are local state — `git clone` does not bring them. Stop the old service before copying the database so its alert history and pending rearms are transferred consistently.
 
 Stop the service on the old server, then copy the files from your laptop:
 
 ```bash
 ssh <olduser>@<OLD_IP> sudo systemctl stop soccer_monitor
-scp <olduser>@<OLD_IP>:~/soccer_monitor/{.env,config_state.json,live_under_alerts.sqlite3} .
-scp .env config_state.json live_under_alerts.sqlite3 ubuntu@<NEW_IP>:~/soccer_monitor/
+scp <olduser>@<OLD_IP>:~/soccer_monitor/soccer_monitor/{.env,config_state.json,live_under_alerts.sqlite3} .
+scp .env config_state.json live_under_alerts.sqlite3 ubuntu@<NEW_IP>:~/soccer_monitor/soccer_monitor/
 ```
 
-Starting fresh instead? Create `.env` by hand using `.env.example` as the key list:
+Starting fresh instead? Create `.env` by hand using `soccer_monitor/.env.example` as the key list:
 
 ```bash
-nano /home/ubuntu/soccer_monitor/.env
+nano /home/ubuntu/soccer_monitor/soccer_monitor/.env
 ```
 
 ### 8. Stop the old server
@@ -137,7 +137,7 @@ sudo systemctl stop soccer_monitor
 ### 9. Install the services
 
 ```bash
-sudo cp /home/ubuntu/soccer_monitor/soccer_monitor.service /etc/systemd/system/
+sudo cp /home/ubuntu/soccer_monitor/soccer_monitor/soccer_monitor.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now soccer_monitor
 sudo systemctl status soccer_monitor
@@ -177,7 +177,7 @@ journalctl -u soccer_monitor -e                     # jump to the end
 ```bash
 cd /home/ubuntu/soccer_monitor
 git pull --ff-only
-sudo install -m 644 soccer_monitor.service /etc/systemd/system/soccer_monitor.service
+sudo install -m 644 soccer_monitor/soccer_monitor.service /etc/systemd/system/soccer_monitor.service
 sudo systemctl daemon-reload
 sudo systemctl restart soccer_monitor
 journalctl -u soccer_monitor -f -n 20
@@ -200,7 +200,7 @@ Leagues and thresholds are editable live via Telegram `/menu` — no restart nee
 chat IDs:
 
 ```bash
-nano /home/ubuntu/soccer_monitor/.env
+nano /home/ubuntu/soccer_monitor/soccer_monitor/.env
 sudo systemctl restart soccer_monitor
 ```
 
@@ -225,3 +225,18 @@ its timeout and then force-kills it. The unit ends up `failed (Result: timeout)`
 
 **Instance stopped on its own** — Oracle stops Always Free instances it considers idle. Restart it
 from the console.
+
+## Updating a checkout that used the old flat layout
+
+The checkout root is still `/home/ubuntu/soccer_monitor`; the soccer code now lives in its `soccer_monitor/` subfolder and the stock code in `sma_bot/`. The shared virtual environment stays at the checkout root.
+
+1. Stop the soccer and SMA services before moving their local files.
+2. Update the checkout with `git pull --ff-only`.
+3. Move the old root `.env`, `config_state.json`, and `live_under_alerts.sqlite3` into `soccer_monitor/`, preserving any SQLite journal or WAL sidecars. Do not overwrite existing destination state.
+4. Put the stock bot’s `SMA_TELEGRAM_*` and optional `SMA_ALERT_COOLDOWN_DAYS` settings in `sma_bot/.env`.
+5. Move the old root `sma_state.json` into `sma_bot/` if it exists, without overwriting existing destination state.
+6. Install `soccer_monitor/soccer_monitor.service` and `sma_bot/sma_crossover_bot.service` in `/etc/systemd/system/` for the services you use.
+7. Run `sudo systemctl daemon-reload`.
+8. Start the services you use and check their logs.
+
+Do not start a second soccer process using the same Telegram bot token. For copying state from an old-layout server, use its old root paths as the `scp` source.

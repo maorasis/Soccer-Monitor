@@ -30,11 +30,22 @@ class Halt(RuntimeError):
     """Stop copying until an execution or configuration problem is resolved."""
 
 
+class SkipBuy(Halt):
+    """Permanently skip a source BUY whose current ask exceeds its price cap."""
+
+
 def positive(value):
     value = D(value)
     if not value.is_finite() or value <= 0:
         raise ValueError('Amounts and account equity must be finite and positive')
     return value
+
+
+def validate_source_wallet(signer, wallet):
+    from polymarket.environments import PRODUCTION
+    from polymarket._internal.wallet import try_classify_wallet_type
+    if try_classify_wallet_type(signer=signer, wallet=wallet, config=PRODUCTION._config.wallet_derivation) is None:
+        raise Halt('SOURCE_SIGNER_ADDRESS does not own SOURCE_WALLET_ADDRESS; regenerate credentials using the correct source account owner key')
 
 
 def buy_amount(source_cost, source_equity, follower_equity):
@@ -183,11 +194,21 @@ class CopyBot:
         with self.store.db:
             self.store.db.execute('UPDATE operations SET active=0 WHERE id=?', (operation['id'],))
             self.store.notice(f"cancel:{operation['id']}", f"Cancelled copied sell order {operation['follower_id']} because the source order changed, closed, or its shares were needed for an exit.")
-    def submit(self, intent, *, event=None, credit=ZERO, source_order=None, order_fingerprint=None, source=None):
+    def submit(self, intent, *, event=None, credit=ZERO, source_order=None, order_fingerprint=None, source=None, available_cash=None):
         if self.store.paused:
             return
         # The durable claim precedes POST. Unknown outcomes are never blindly replayed.
-        signed = self.broker.prepare(intent)
+        try:
+            signed = self.broker.prepare(intent)
+        except SkipBuy as exc:
+            if event is None or intent['side'] != 'BUY':
+                raise
+            with self.store.db:
+                self.store.mark(event, intent['asset_id'])
+                self.store.notice('skip:' + event, f'Permanently skipped source BUY: {exc}. Source: {source}. No order submitted.')
+            return
+        if intent['side'] == 'BUY' and available_cash is not None and D(intent['amount']) > available_cash:
+            raise Halt('Insufficient available cash for the total-account-sized BUY')
         payload = dataclasses.asdict(signed) if dataclasses.is_dataclass(signed) else signed
         with self.store.db:
             cursor = self.store.db.execute('''INSERT INTO operations
@@ -252,9 +273,8 @@ class CopyBot:
                 amount = buy_amount(trade.shares * trade.price, source.equity, follower.equity)
                 if amount < CENT:
                     raise Halt('Proportional BUY is below one cent; cannot copy without changing its allocation')
-                if amount > follower.cash:
-                    raise Halt('Insufficient available cash for the total-account-sized BUY')
-                intent = dict(kind='market', asset_id=trade.asset, side='BUY', amount=str(amount))
+                intent = dict(kind='market', asset_id=trade.asset, side='BUY', amount=str(amount),
+                              max_price=str((positive(trade.price) * D('1.10')).normalize()))
             else:
                 managed = min(max(ZERO, self.store.inventory(trade.asset)), follower.positions.get(trade.asset, ZERO))
                 credit = self.store.credit(trade.asset)
@@ -291,7 +311,8 @@ class CopyBot:
                 if shares > managed - reserved:
                     raise Halt('Unrelated open sell orders reserve shares needed for a copied SELL')
                 intent = dict(kind='market', asset_id=trade.asset, side='SELL', shares=str(shares))
-            self.submit(intent, event=trade.id, credit=credit_used, source=f'{trade.side} {trade.shares} shares at ${trade.price}; order {trade.order_id}')
+            self.submit(intent, event=trade.id, credit=credit_used, available_cash=follower.cash,
+                        source=f'{trade.side} {trade.shares} shares at ${trade.price}; order {trade.order_id}')
             return  # Refresh fills and balances before deciding the next order.
         reserved = self.broker.open_reservations(own)
         for order in sorted(orders.values(), key=lambda o: (o.created_at, o.id)):
@@ -406,7 +427,19 @@ class PolymarketBroker:
     def prepare(self, intent):
         args = {k: v for k, v in intent.items() if k != 'kind'}
         if intent['kind'] == 'market':
-            # No user slippage cap: the SDK resolves a current executable bound.
+            if intent['side'] == 'BUY':
+                book = self.client.get_order_book(asset_id=intent['asset_id'])
+                tick = positive(book.tick_size)
+                if tick >= 1:
+                    raise Halt('Invalid market tick size; no BUY submitted')
+                cap = (min(positive(intent['max_price']), 1 - tick) / tick).to_integral_value(rounding=ROUND_DOWN) * tick
+                asks = [positive(level.price) for level in book.asks if positive(level.size)]
+                if not asks:
+                    raise Halt('No asks available; no BUY submitted')
+                if min(asks) > cap:
+                    raise SkipBuy(f'Current lowest ask ${min(asks)} exceeds the source price + 10% limit (${cap})')
+                # The signed bound still protects the BUY if prices move after this read.
+                args['max_price'] = str(cap)
             return self.client.create_market_order(**args, order_type='FOK')
         return self.client.create_limit_order(**args)
     def post(self, signed):
@@ -571,6 +604,7 @@ def main():
     signer = required('SOURCE_SIGNER_ADDRESS')
     if not all(is_address(a) for a in (source_wallet, follower_wallet, signer)) or source_wallet.lower() == follower_wallet.lower():
         raise Halt('Configure valid, different source and Reem wallet addresses, and the source signer address')
+    validate_source_wallet(signer, source_wallet)
     stopped = False
     def stop(*_):
         nonlocal stopped

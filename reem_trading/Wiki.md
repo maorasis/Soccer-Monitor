@@ -185,7 +185,7 @@ Orders and positions that already existed before the first live start are not au
 
 Polling defaults to two seconds **plus network and processing time**. Settlement waits, history scans, and queued operations add delay. This is not a guaranteed two-second execution time.
 
-The proposed **10% maximum increase for copied buys is not implemented yet**; behavior above that cap still needs a decision. Current market copies have no extra percentage price cap. Do not enable live trading on the assumption that the proposed cap is active.
+Copied buys are limited to **10% above your source fill price**. For an 80¢ source buy, Reem can pay up to 88¢ per share, rounded down to the market's price increment. If the current lowest ask is higher, the bot **permanently skips that buy** and sends a Telegram notice. The signed order also enforces the cap if prices change during submission. Fees are separate. A price move or insufficient liquidity can still cause a fill-or-kill rejection, which stops copying for review.
 
 <a id="setup"></a>
 

@@ -107,6 +107,41 @@ class APIContractTests(unittest.TestCase):
         self.assertEqual(rows[0].chain_sequence,(16,1))
         self.assertEqual(rows[1].chain_sequence,(16,0))
 
+    def test_buy_above_cap_is_blocked_before_signing(self):
+        from unittest.mock import Mock
+        create = Mock(return_value={})
+        client = NS(get_order_book=lambda **kw: NS(tick_size=D('.01'), asks=[NS(price=D('.89'), size=D('100'))]),
+                    create_market_order=create)
+        broker = PolymarketBroker(client, None, None, WALLET, None)
+        with self.assertRaisesRegex(Halt, '10%'):
+            broker.prepare(dict(kind='market', asset_id='123', side='BUY', amount='10', max_price='0.88'))
+        create.assert_not_called()
+
+    def test_buy_below_cap_keeps_signed_bound_and_rounds_down_to_tick(self):
+        from unittest.mock import Mock
+        for ask, maximum, tick, expected in [('.85','.88','.01','.88'), ('.88','.8833','.01','.88'),
+                                              ('.99','1.045','.01','.99'), ('.8775','.88','.0025','.8800')]:
+            with self.subTest(ask=ask, maximum=maximum):
+                create = Mock(return_value='signed')
+                client = NS(get_order_book=lambda **kw: NS(tick_size=D(tick), asks=[NS(price=D(ask), size=D('100'))]),
+                            create_market_order=create)
+                broker = PolymarketBroker(client, None, None, WALLET, None)
+                result = broker.prepare(dict(kind='market', asset_id='123', side='BUY', amount='10', max_price=maximum))
+                self.assertEqual(result, 'signed')
+                self.assertEqual(D(create.call_args.kwargs['max_price']), D(expected))
+                self.assertEqual(create.call_args.kwargs['order_type'], 'FOK')
+
+    def test_source_wallet_must_belong_to_configured_owner_signer(self):
+        from copy_bot import validate_source_wallet
+        from eth_account import Account
+        from polymarket.environments import PRODUCTION
+        from polymarket._internal.wallet import derive_proxy_wallet_address
+        signer = Account.create()
+        wallet = derive_proxy_wallet_address(signer.address, PRODUCTION._config.wallet_derivation)
+        validate_source_wallet(signer.address, wallet)
+        with self.assertRaisesRegex(Halt, 'SOURCE_WALLET_ADDRESS'):
+            validate_source_wallet(signer.address, '0x' + '1'*40)
+
     def test_exchange_error_on_cancel_must_not_be_treated_as_success(self):
         client=NS(cancel_order=lambda **kw: NS(canceled=()), get_order=lambda **kw: NS(status='LIVE'))
         broker=PolymarketBroker(client,None,None,WALLET,None)

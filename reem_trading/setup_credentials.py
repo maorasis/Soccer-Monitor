@@ -11,6 +11,7 @@ from pathlib import Path
 import httpx
 from dotenv import dotenv_values, set_key
 from eth_account import Account
+from copy_bot import validate_source_wallet, Halt
 from polymarket._internal.actions.auth import create_or_derive_api_key_sync
 from polymarket._internal.l1_auth import sign_api_key_auth
 from polymarket.clients._transport import SyncTransport
@@ -40,7 +41,13 @@ def source(path):
         key = getpass('YOUR source-account signing private key (hidden; not saved): ').strip()
     signer = Account.from_key(key)
     expected = values.get('SOURCE_SIGNER_ADDRESS')
-    if expected and expected.lower() != signer.address.lower():
+    wallet = values.get('SOURCE_WALLET_ADDRESS')
+    if wallet:
+        try:
+            validate_source_wallet(signer.address, wallet)
+        except Halt as exc:
+            raise SetupError(str(exc)) from None
+    elif expected and expected.lower() != signer.address.lower():
         raise SetupError('Key does not match SOURCE_SIGNER_ADDRESS. Confirm that field is the signer, not the profile wallet; no credentials generated.')
     # Use the pinned SDK's auth helpers only; a full client can deploy a wallet.
     transport = SyncTransport(base_url='https://clob.polymarket.com')

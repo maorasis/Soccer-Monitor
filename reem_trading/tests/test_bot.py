@@ -68,6 +68,25 @@ class CopyTests(unittest.TestCase):
         self.assertEqual(buy_amount(D('100'), D('2000'), D('1000')), D('50.00'))
         self.bot.cycle([fill()], [], self.source)
         self.assertEqual(self.broker.sent[0]['amount'], '25.00')
+    def test_buy_carries_ten_percent_cap_from_source_fill(self):
+        trade = fill()
+        trade.price = D('.8')
+        self.bot.cycle([trade], [], self.source)
+        self.assertEqual(self.broker.sent[0].get('max_price'), '0.88')
+
+    def test_overpriced_buy_is_permanently_skipped_without_submission(self):
+        from copy_bot import SkipBuy
+        from unittest.mock import patch
+        self.broker.cash = D('0')
+        with patch.object(self.broker, 'prepare', side_effect=SkipBuy('Ask exceeds source price + 10%')):
+            self.bot.cycle([fill()], [], self.source)
+        self.assertEqual(self.broker.sent, [])
+        self.assertTrue(self.db.seen('buy1'))
+        self.assertEqual(self.db.operations(), [])
+        self.bot.cycle([fill()], [], self.source)
+        self.assertEqual(self.broker.sent, [])
+        self.assertIn('10%', self.db.db.execute("SELECT text FROM notices WHERE id='skip:buy1'").fetchone()[0])
+
     def test_nonfinite_or_zero_equity_is_rejected(self):
         for value in [D('0'), D('-1'), D('NaN'), D('Infinity')]:
             with self.assertRaises(ValueError):

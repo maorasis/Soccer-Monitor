@@ -199,7 +199,7 @@ Soccer polling follows its saved daily schedule. SMA scans follow their schedule
 
 ## 4. 🤖 Reem updates — only after its initial installation
 
-**Reem was not installed or running on Oracle when this guide was written.** Use [Reem's installation instructions](reem_trading/README.md#oracle-installation) for its first deployment. Its requested 10% buy-price cap is still unimplemented; do not start live trading assuming that protection exists.
+**Reem was not installed or running on Oracle when this guide was written.** Use [Reem's installation instructions](reem_trading/README.md#oracle-installation) for its first deployment. Copied buys enforce a 10% price cap and permanently skip an already-overpriced buy; see Reem's README for the execution rules.
 
 For an already installed Reem service:
 

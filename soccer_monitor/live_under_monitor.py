@@ -1,8 +1,7 @@
 """Poll live full-game Under markets and send initial and manually rearmed alerts.
 
-The monitor shares configuration, Telegram UI and health reporting with the older
-websocket daemon, but has its own discovery, price checks and SQLite alert history.
-Prices are fractions of a dollar internally; the control panel accepts cents.
+Alert claims, rearms and the daily report's alert log live in one SQLite file beside
+the config. Prices are fractions of a dollar internally; the control panel accepts cents.
 """
 
 import asyncio
@@ -23,24 +22,23 @@ from zoneinfo import ZoneInfo
 import aiohttp
 
 from bot_ui import start_bot_polling
-from config_manager import RuntimeConfig, UNDER_ACTIVE_END_HOUR, UNDER_ACTIVE_START_HOUR, UNDER_DEFAULT_THRESHOLDS
-from soccer_monitor import (
+from common import (
+    DEP_BOOKS,
     DEP_GAMMA,
-    DEP_TELEGRAM,
-    ISRAEL_TZ,
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHAT_ID,
-    AlertEngine,
     ApiHealth,
     ErrorAlertHandler,
+    TelegramSender,
     error_alert_loop,
     parse_game_total_line,
 )
+from config_manager import RuntimeConfig, UNDER_DEFAULT_THRESHOLDS
+from daily_report import prepare_report_tables, record_alert, run_daily_reports
 
 logger = logging.getLogger("LiveUnderMonitor")
 EVENTS_URL = "https://gamma-api.polymarket.com/events/keyset"
 BOOKS_URL = "https://clob.polymarket.com/books"
-DEP_BOOKS = "Polymarket order books"
 MAX_MATCH_AGE = timedelta(hours=4)
 POLL_INTERVAL_SECONDS = 15
 
@@ -53,14 +51,8 @@ class UnderMarket:
     title: str
     slug: str
     score: str
-
-
-def is_active(now: datetime) -> bool:
-    """Check the original default Israel-time window, independent of saved settings.
-
-    The running poll loop uses RuntimeConfig.monitoring_active instead.
-    """
-    return UNDER_ACTIVE_START_HOUR <= now.astimezone(ISRAEL_TZ).hour < UNDER_ACTIVE_END_HOUR
+    # Identifies the market at Polymarket; the daily report looks up its outcome by it.
+    condition_id: str = ""
 
 
 def prepare_alert_history(db: sqlite3.Connection) -> None:
@@ -74,6 +66,7 @@ def prepare_alert_history(db: sqlite3.Connection) -> None:
             due_at REAL
         )
     """)
+    prepare_report_tables(db)
 
 
 def schedule_rearm(db: sqlite3.Connection, button_id: str, now: datetime) -> int | None:
@@ -152,7 +145,8 @@ async def fetch_live_markets(session, config: RuntimeConfig, now: datetime) -> d
                 except (KeyError, ValueError):
                     continue
 
-                markets[token] = UnderMarket(league, line, event["title"], event["slug"], event.get("score") or "")
+                markets[token] = UnderMarket(league, line, event["title"], event["slug"], event.get("score") or "",
+                                             str(market.get("conditionId") or ""))
 
         cursor = page.get("next_cursor")
         if not cursor:
@@ -232,6 +226,8 @@ async def poll_once(session, config: RuntimeConfig, db: sqlite3.Connection, send
             "callback_data": f"rearm_alert:{button_id}",
         }]]}
         delivered = await send_text(message, reply_markup=markup)
+        if delivered is not False:
+            record_alert(db, token, market, price, now)
         if delivered:
             logger.info("Alert sent for %s, Under %g at %g¢", market.title, market.line, price * 100)
         elif delivered is False:
@@ -283,7 +279,7 @@ async def fetch_ui_markets(session, config, health):
 async def run_polls(session, config, db, send_text, health, snapshot=None):
     """Poll on POLL_INTERVAL_SECONDS boundaries inside the saved local-time monitoring window."""
     while True:
-        now = datetime.now(ISRAEL_TZ)
+        now = datetime.now(timezone.utc)
         if config.monitoring_active(now):
             local = now.astimezone(ZoneInfo(config.monitor_timezone))
             hour, minute = map(int, config.monitor_end.split(":"))
@@ -303,8 +299,8 @@ async def main():
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         raise RuntimeError("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required")
     int(TELEGRAM_CHAT_ID)
-    config = RuntimeConfig(under_totals=True)
-    health = ApiHealth((DEP_GAMMA, DEP_BOOKS, DEP_TELEGRAM))
+    config = RuntimeConfig()
+    health = ApiHealth()
     error_queue = asyncio.Queue(maxsize=100)
     logging.getLogger().addHandler(ErrorAlertHandler(error_queue))
     logger.info("Starting live Under monitor, active from %s to %s (%s)",
@@ -314,12 +310,13 @@ async def main():
     with closing(sqlite3.connect(history)) as db:
         prepare_alert_history(db)
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
-            alerts = AlertEngine(session, health)
-            send_alert = partial(alerts.send_text, report_uncertain=True)
+            telegram = TelegramSender(session, health)
+            send_alert = partial(telegram.send_text, report_uncertain=True)
             snapshot = {}
             tasks = asyncio.gather(
                 run_polls(session, config, db, send_alert, health, snapshot),
-                error_alert_loop(alerts, error_queue),
+                run_daily_reports(session, config, db, send_alert),
+                error_alert_loop(telegram, error_queue),
                 start_bot_polling(
                     TELEGRAM_BOT_TOKEN, config, TELEGRAM_CHAT_ID, health, snapshot,
                     notification_sender=send_alert,
@@ -337,4 +334,5 @@ async def main():
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(name)s - %(levelname)s - %(message)s")
     asyncio.run(main())

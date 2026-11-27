@@ -17,7 +17,7 @@ class BotFeatureTests(unittest.TestCase):
     def setUp(self):
         self.tmp = TemporaryDirectory()
         self.path = Path(self.tmp.name) / "config.json"
-        self.config = RuntimeConfig(self.path, under_totals=True)
+        self.config = RuntimeConfig(self.path)
         self.old = bot_ui.config, bot_ui.market_fetcher, bot_ui.test_sender
         bot_ui.config = self.config
         bot_ui.market_fetcher = None
@@ -104,7 +104,7 @@ class BotFeatureTests(unittest.TestCase):
 
         message.text = "20"
         asyncio.run(bot_ui.process_alert_cooldown(message, state))
-        self.assertEqual(RuntimeConfig(self.path, under_totals=True).alert_cooldown_minutes, 20)
+        self.assertEqual(RuntimeConfig(self.path).alert_cooldown_minutes, 20)
         state.clear.assert_awaited_once()
 
         button_id = "a" * 32
@@ -124,7 +124,7 @@ class BotFeatureTests(unittest.TestCase):
 
     def test_schedule_persistence_overnight_and_timezone(self):
         self.assertTrue(self.config.set_monitor_schedule("22:30", "02:15", "Europe/London"))
-        config = RuntimeConfig(self.path, under_totals=True)
+        config = RuntimeConfig(self.path)
         self.assertTrue(config.monitoring_active(datetime(2026, 1, 1, 23, tzinfo=timezone.utc)))
         self.assertTrue(config.monitoring_active(datetime(2026, 1, 2, 2, 14, tzinfo=timezone.utc)))
         self.assertFalse(config.monitoring_active(datetime(2026, 1, 2, 2, 15, tzinfo=timezone.utc)))
@@ -143,7 +143,7 @@ class BotFeatureTests(unittest.TestCase):
         message.text = "09:30 18:15 UTC"
         asyncio.run(bot_ui.process_schedule(message, state))
         state.clear.assert_awaited_once()
-        self.assertEqual(RuntimeConfig(self.path, under_totals=True).monitor_end, "18:15")
+        self.assertEqual(RuntimeConfig(self.path).monitor_end, "18:15")
 
 
 if __name__ == "__main__":

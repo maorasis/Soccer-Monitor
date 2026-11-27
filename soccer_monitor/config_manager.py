@@ -1,14 +1,14 @@
-"""Persist shared league, threshold and live-Under schedule configuration.
+"""Persist league, Under-limit, schedule and report settings for the live monitor.
 
-The JSON file is shared by monitor components in a process. RuntimeConfig keeps an
-in-memory copy; changing the file externally does not automatically reload it.
+RuntimeConfig keeps an in-memory copy of a JSON file; changing the file externally
+does not automatically reload it.
 """
 
 import json
 import os
 import logging
 import tempfile
-from typing import Dict, List, Set
+from typing import Dict, List
 from datetime import timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -16,26 +16,31 @@ logger = logging.getLogger("ConfigManager")
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-SUPPORTED_LEAGUES = {    # Top 5 European Leagues
-    "Premier League": {"api_id": 39, "polymarket_tags": ["premier league", "epl"], "flag": "🏴󠁧󠁢󠁥󠁮󠁧󠁿"},
-    "La Liga": {"api_id": 140, "polymarket_tags": ["la liga", "laliga"], "flag": "🇪🇸"},
-    "Serie A": {"api_id": 135, "polymarket_tags": ["serie a", "sea"], "flag": "🇮🇹"},
-    "Bundesliga": {"api_id": 78, "polymarket_tags": ["bundesliga"], "flag": "🇩🇪"},
-    "Ligue 1": {"api_id": 61, "polymarket_tags": ["ligue 1"], "flag": "🇫🇷"},
+SUPPORTED_LEAGUES = {
+    # Top European leagues. polymarket_tags are compared, case-insensitively, with the
+    # exact labels of a Gamma event's tags.
+    "Premier League": {"polymarket_tags": ["premier league", "epl"], "flag": "🏴󠁧󠁢󠁥󠁮󠁧󠁿"},
+    "La Liga": {"polymarket_tags": ["la liga", "laliga"], "flag": "🇪🇸"},
+    "Serie A": {"polymarket_tags": ["serie a", "sea"], "flag": "🇮🇹"},
+    "Bundesliga": {"polymarket_tags": ["bundesliga"], "flag": "🇩🇪"},
+    "Ligue 1": {"polymarket_tags": ["ligue 1"], "flag": "🇫🇷"},
+    # Polymarket uses the league codes "por" and "ere" in these leagues' URLs.
+    "Primeira Liga": {"polymarket_tags": ["primeira liga", "liga portugal", "liga portugal betclic", "por"], "flag": "🇵🇹"},
+    "Eredivisie": {"polymarket_tags": ["eredivisie", "dutch eredivisie", "ere"], "flag": "🇳🇱"},
     # International Tournaments
-    "World Cup": {"api_id": 1, "polymarket_tags": ["fifa world cup", "world cup"], "flag": "🌍"},
-    "Euro Championship": {"api_id": 4, "polymarket_tags": ["euro", "european championship", "uefa euro"], "flag": "🇪🇺"},
-    "UEFA Nations League": {"api_id": 5, "polymarket_tags": ["uefa nations league", "unl"], "flag": "🇪🇺"},
+    "World Cup": {"polymarket_tags": ["fifa world cup", "world cup"], "flag": "🌍"},
+    "Euro Championship": {"polymarket_tags": ["euro", "european championship", "uefa euro"], "flag": "🇪🇺"},
+    "UEFA Nations League": {"polymarket_tags": ["uefa nations league", "unl"], "flag": "🇪🇺"},
     # UEFA Club Competitions
-    "Champions League": {"api_id": 2, "polymarket_tags": ["champions league", "ucl"], "flag": "🇪🇺"},
-    "Europa League": {"api_id": 3, "polymarket_tags": ["europa league", "uel"], "flag": "🇪🇺"},
-    "Conference League": {"api_id": 848, "polymarket_tags": ["conference league", "europa conference league", "uecl"], "flag": "🇪🇺"},
+    "Champions League": {"polymarket_tags": ["champions league", "ucl"], "flag": "🇪🇺"},
+    "Europa League": {"polymarket_tags": ["europa league", "uel"], "flag": "🇪🇺"},
+    "Conference League": {"polymarket_tags": ["conference league", "europa conference league", "uecl"], "flag": "🇪🇺"},
     # Domestic Cups
-    "FA Cup": {"api_id": 45, "polymarket_tags": ["fa cup"], "flag": "🏴󠁧󠁢󠁥󠁮󠁧󠁿"},
-    "Carabao Cup": {"api_id": 48, "polymarket_tags": ["carabao cup", "efl cup", "league cup"], "flag": "🏴󠁧󠁢󠁥󠁮󠁧󠁿"},
-    "Copa del Rey": {"api_id": 143, "polymarket_tags": ["copa del rey"], "flag": "🇪🇸"},
-    "DFB Pokal": {"api_id": 81, "polymarket_tags": ["dfb pokal", "dfb-pokal", "german cup"], "flag": "🇩🇪"},
-    "Coppa Italia": {"api_id": 137, "polymarket_tags": ["coppa italia", "italian cup"], "flag": "🇮🇹"},
+    "FA Cup": {"polymarket_tags": ["fa cup"], "flag": "🏴󠁧󠁢󠁥󠁮󠁧󠁿"},
+    "Carabao Cup": {"polymarket_tags": ["carabao cup", "efl cup", "league cup"], "flag": "🏴󠁧󠁢󠁥󠁮󠁧󠁿"},
+    "Copa del Rey": {"polymarket_tags": ["copa del rey"], "flag": "🇪🇸"},
+    "DFB Pokal": {"polymarket_tags": ["dfb pokal", "dfb-pokal", "german cup"], "flag": "🇩🇪"},
+    "Coppa Italia": {"polymarket_tags": ["coppa italia", "italian cup"], "flag": "🇮🇹"},
 }
 
 DEFAULT_ACTIVE_LEAGUES = [
@@ -44,15 +49,16 @@ DEFAULT_ACTIVE_LEAGUES = [
     "Serie A",
     "Bundesliga",
     "Ligue 1",
+    "Primeira Liga",
+    "Eredivisie",
     "World Cup",
     "UEFA Nations League",
 ]
 UNDER_DEFAULT_THRESHOLDS = {5.5: 0.80, 6.5: 0.85, 7.5: 0.85}
-UNDER_ACTIVE_START_HOUR = 14
-UNDER_ACTIVE_END_HOUR = 23
 DEFAULT_ALERT_COOLDOWN_MINUTES = 15
 MIN_ALERT_COOLDOWN_MINUTES = 2
 MAX_ALERT_COOLDOWN_MINUTES = 1440
+
 
 class RuntimeConfig:
     """Mutable runtime settings backed by an atomically replaced JSON file.
@@ -60,37 +66,39 @@ class RuntimeConfig:
     Under limits are keyed by league and stringified goal line; absent entries use
     UNDER_DEFAULT_THRESHOLDS. Prices are dollar fractions, not cents.
     """
-    def __init__(self, filepath=None, *, under_totals=False):
+    def __init__(self, filepath=None):
         if filepath is None:
             filepath = os.path.join(SCRIPT_DIR, "config_state.json")
         self.filepath = filepath
-        self.under_totals = under_totals
-        
+
         # Default settings
-        self.global_threshold = float(os.getenv("ASK_PRICE_THRESHOLD", "0.10"))
         self.active_leagues: List[str] = list(DEFAULT_ACTIVE_LEAGUES)
-        self.league_thresholds: Dict[str, float] = {} # e.g. {"La Liga": 0.08}
         self.under_thresholds: Dict[str, Dict[str, float]] = {}
         self.monitor_start = "14:00"
         self.monitor_end = "23:00"
         self.monitor_timezone = "Asia/Jerusalem"
-        
         self.alert_cooldown_minutes = DEFAULT_ALERT_COOLDOWN_MINUTES
+        self.daily_report_enabled = True
         self.load()
 
     def load(self):
-        """Load saved fields, retaining defaults for absent or invalid schedule fields."""
+        """Load saved fields, retaining defaults for absent or invalid fields.
+
+        Fields of the removed websocket monitor (global and league thresholds) are
+        ignored and dropped on the next save.
+        """
         if os.path.exists(self.filepath):
             try:
                 with open(self.filepath, 'r') as f:
                     data = json.load(f)
-                self.global_threshold = data.get("global_threshold", self.global_threshold)
                 self.active_leagues = data.get("active_leagues", self.active_leagues)
-                self.league_thresholds = data.get("league_thresholds", self.league_thresholds)
                 self.under_thresholds = data.get("under_thresholds", {})
                 cooldown = data.get("alert_cooldown_minutes", DEFAULT_ALERT_COOLDOWN_MINUTES)
                 if type(cooldown) is int and MIN_ALERT_COOLDOWN_MINUTES <= cooldown <= MAX_ALERT_COOLDOWN_MINUTES:
                     self.alert_cooldown_minutes = cooldown
+                report = data.get("daily_report_enabled", True)
+                if type(report) is bool:
+                    self.daily_report_enabled = report
                 schedule = data.get("monitor_schedule", {})
                 try:
                     self._validate_schedule(schedule.get("start", "14:00"), schedule.get("end", "23:00"), schedule.get("timezone", "Asia/Jerusalem"))
@@ -103,24 +111,22 @@ class RuntimeConfig:
             except Exception as e:
                 logger.error(f"Failed to load config: {e}")
         else:
-            self.save() # Create initial file
+            self.save()  # Create initial file
 
     def save(self):
         """Replace the config file atomically; return False on any write failure."""
         data = {
-            "global_threshold": self.global_threshold,
             "active_leagues": self.active_leagues,
-            "league_thresholds": self.league_thresholds,
-            "monitor_schedule": {"start": getattr(self, "monitor_start", "14:00"), "end": getattr(self, "monitor_end", "23:00"), "timezone": getattr(self, "monitor_timezone", "Asia/Jerusalem")},
+            "monitor_schedule": {"start": self.monitor_start, "end": self.monitor_end, "timezone": self.monitor_timezone},
+            "alert_cooldown_minutes": self.alert_cooldown_minutes,
+            "daily_report_enabled": self.daily_report_enabled,
         }
-        data["alert_cooldown_minutes"] = getattr(self, "alert_cooldown_minutes", DEFAULT_ALERT_COOLDOWN_MINUTES)
-        under_thresholds = getattr(self, "under_thresholds", {})
-        if under_thresholds:
-            data["under_thresholds"] = under_thresholds
+        if self.under_thresholds:
+            data["under_thresholds"] = self.under_thresholds
         # Write a temporary file and rename it over the target. os.replace is
         # atomic, so a crash mid-save leaves the previous config intact instead of a
         # truncated file -- which load() would fail to parse and silently replace with
-        # the default league list, turning a bad moment into changed trading behaviour.
+        # the default league list, turning a bad moment into changed alert behaviour.
         try:
             directory = os.path.dirname(self.filepath) or "."
             fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".config_state-",
@@ -152,6 +158,17 @@ class RuntimeConfig:
         if self.save():
             return True
         self.alert_cooldown_minutes = previous
+        return False
+
+    def set_daily_report(self, enabled: bool) -> bool:
+        """Persist whether the daily alert report is sent; roll back if saving fails."""
+        if type(enabled) is not bool:
+            raise ValueError("Invalid daily report setting")
+        previous = self.daily_report_enabled
+        self.daily_report_enabled = enabled
+        if self.save():
+            return True
+        self.daily_report_enabled = previous
         return False
 
     @staticmethod
@@ -224,32 +241,11 @@ class RuntimeConfig:
         self.under_thresholds = previous
         return False
 
-    def get_threshold(self, league_name: str) -> float:
-        # Match polymorphic league name string to our standardized supported leagues
-        matched_league = self.match_league_name(league_name)
-        if matched_league and matched_league in self.league_thresholds:
-            return self.league_thresholds[matched_league]
-        return self.global_threshold
-        
-    def set_global_threshold(self, threshold: float):
-        self.global_threshold = threshold
-        self.save()
-        
-    def set_league_threshold(self, league_name: str, threshold: float):
-        if league_name in SUPPORTED_LEAGUES:
-            self.league_thresholds[league_name] = threshold
-            self.save()
-            
-    def remove_league_threshold(self, league_name: str):
-        if league_name in self.league_thresholds:
-            del self.league_thresholds[league_name]
-            self.save()
-            
     def toggle_league(self, league_name: str) -> bool:
-        """Toggles a league's active state. Returns the new state (True if active)."""
+        """Toggle a league's active state. Return the new state (True if active)."""
         if league_name not in SUPPORTED_LEAGUES:
             return False
-            
+
         if league_name in self.active_leagues:
             self.active_leagues.remove(league_name)
             self.save()
@@ -259,22 +255,8 @@ class RuntimeConfig:
             self.save()
             return True
 
-    def get_active_api_ids(self) -> Set[int]:
-        ids = set()
-        for l in self.active_leagues:
-            if l in SUPPORTED_LEAGUES:
-                ids.add(SUPPORTED_LEAGUES[l]["api_id"])
-        return ids
-
-    def get_active_polymarket_tags(self) -> Set[str]:
-        tags = set()
-        for l in self.active_leagues:
-            if l in SUPPORTED_LEAGUES:
-                tags.update(SUPPORTED_LEAGUES[l]["polymarket_tags"])
-        return tags
-        
     def match_league_name(self, polymarket_league_name: str) -> str:
-        """Attempts to match a tag or name from polymarket to a supported league name."""
+        """Match an exact Polymarket tag label or league name to a supported league."""
         lower_name = polymarket_league_name.lower()
         for name, data in SUPPORTED_LEAGUES.items():
             if lower_name == name.lower() or lower_name in data["polymarket_tags"]:

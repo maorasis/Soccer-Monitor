@@ -1,11 +1,11 @@
 # Football_Under_Monitor developer documentation
 
-Verified against the working tree on 2026-11-22. Links point to source files so
+Verified against the working tree on 2026-11-27. Links point to source files so
 that contracts can be checked against the implementation.
 
-- [System overview](overview.md): entry points, dependencies, shared state, and deployment.
-- [Soccer monitors](soccer-monitors.md): polling and websocket alert flows, and their different delivery semantics.
-- [Helper scripts](stock-and-tools.md): soccer maintenance and analysis scripts. Stock tools are documented in [the SMA bot](../../sma_bot/README.md).
+- [System overview](overview.md): modules, dependencies, shared state, tests, and deployment.
+- [Live monitor internals](soccer-monitors.md): polling, alert delivery, rearms, the daily report, and the control panel.
+- [Helper scripts](stock-and-tools.md): soccer analysis scripts. Stock tools are documented in [the SMA bot](../../sma_bot/README.md).
 - [Operator setup](../README.md) and [VM deployment guide](../oracle_daemon_guide.md).
 
 The checked-in service configuration is evidence of deployment configuration,

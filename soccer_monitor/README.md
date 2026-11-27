@@ -1,7 +1,7 @@
 # Football_Under_Monitor
 
 For maintainers, see the [developer documentation](docs/README.md), including
-the separate websocket soccer monitor and helper scripts.
+helper scripts.
 
 `live_under_monitor.py` polls Polymarket every 15 seconds during its configured daily window, which defaults to 14:00 up to 23:00 Israel local time. It looks for the lowest ask, the cheapest offer to sell, on these full-game Under markets in live matches from the enabled leagues.
 
@@ -15,6 +15,12 @@ The first poll at or below the limit triggers a Telegram alert. Tap **Rearm in 1
 
 **Live Markets** fetches markets and asks when you open the view or change pages. Keep the SQLite alert history file when moving the service to a new host so scheduled rearms survive the move.
 
+## Daily report
+
+On days when at least one alert was sent, the bot sends a summary the next morning at 09:00 in the monitoring timezone. It lists each alert with its time, match, line and ask, and whether the Under won, lost or is still pending. It also totals the result as if one share had been bought at each alerted ask. No report is sent for a day without alerts.
+
+Use **Daily Report** in the bot menu to switch the report off or back on. Alerts are still recorded while it is off. A report missed while it was off is not sent later, except that switching it back on the same day still sends the previous day's report.
+
 ## Setup & Configuration
 
 Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in the soccer monitor’s `soccer_monitor/.env` file. Market prices and match status come from Polymarket’s public APIs.
@@ -27,7 +33,7 @@ Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in the soccer monitor’s `socce
 4. Choose an Under line.
 5. Enter the limit in cents, for example `80`.
 
-**Manage Leagues** controls which leagues the monitor checks. League selections and limits are saved in `config_state.json` and apply without a restart.
+**Manage Leagues** controls which leagues the monitor checks, including Portugal's Primeira Liga and the Dutch Eredivisie. A new installation enables both by default; an existing `config_state.json` keeps its saved league list, so enable them in **Manage Leagues**. League selections and limits are saved in `config_state.json` and apply without a restart.
 
 The main menu also offers **View Thresholds**, including defaults and custom values, and **Live Markets**, showing only active games in enabled leagues whose freshly fetched asks are at or below their current limits. Markets above the limit or without an ask are hidden. The timestamp indicates when prices were fetched; opening the view does not send market alerts. **Send Test Notification** checks the configured alert delivery channel without creating a market alert.
 
@@ -57,13 +63,10 @@ The [wiki page](wiki/Home.md) contains the consolidated soccer monitor guide, pr
 
 ## Tests and helper scripts
 
-Run tests from this folder so the existing script imports resolve:
+Run all tests from this folder:
 
 ```bash
-uv run python -m unittest tests.test_live_under_monitor tests.test_bot_features
-uv run python tests/test_market_filter.py
+uv run python -m unittest
 ```
 
-Other regression scripts are under `tests/`. `tests/test_threshold_alert.py` is a manual smoke script that sends a real Telegram message; do not include it in an automated run.
-
-Run the team-name mapping tool from this folder with `uv run python -m scripts.team_mapper`; it can contact APIs, prompt for input, and update `team_mapping.json`. The mapping checker is `uv run python scripts/check_prefixes.py`.
+They run offline and send no messages. GitHub Actions runs them on every push and pull request.

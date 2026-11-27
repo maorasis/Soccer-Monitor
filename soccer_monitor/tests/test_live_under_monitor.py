@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import bot_ui
 from config_manager import RuntimeConfig, SUPPORTED_LEAGUES
-from live_under_monitor import ApiHealth, fetch_live_markets, is_active, poll_once, prepare_alert_history, schedule_rearm
+from live_under_monitor import ApiHealth, fetch_live_markets, poll_once, prepare_alert_history, schedule_rearm
 
 
 NOW = datetime(2026, 11, 20, 17, tzinfo=timezone.utc)
@@ -93,7 +93,7 @@ class LiveUnderMonitorTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.json"
             history = Path(tmp) / "alerts.sqlite3"
-            config = RuntimeConfig(config_path, under_totals=True)
+            config = RuntimeConfig(config_path)
             api = MarketAPI()
             sender = AsyncMock(return_value=True)
             health = ApiHealth()
@@ -107,7 +107,7 @@ class LiveUnderMonitorTests(unittest.TestCase):
                 self.assertEqual(schedule_rearm(db, button_id, NOW), 15)
                 self.assertIsNone(schedule_rearm(db, button_id, NOW + timedelta(minutes=1)))
 
-            config = RuntimeConfig(config_path, under_totals=True)
+            config = RuntimeConfig(config_path)
             self.assertEqual(config.alert_cooldown_minutes, 25)
             with closing(sqlite3.connect(history)) as db:
                 prepare_alert_history(db)
@@ -126,16 +126,18 @@ class LiveUnderMonitorTests(unittest.TestCase):
                 self.assertEqual(followup["text"], "Rearm in 25 min")
                 self.assertIsNone(schedule_rearm(db, button_id, NOW + timedelta(minutes=19)))
 
-    def test_window_follows_israel_local_time(self):
-        for month, offset in ((1, 2), (7, 3)):
-            self.assertFalse(is_active(datetime(2026, month, 15, 13 - offset, 59, tzinfo=timezone.utc)))
-            self.assertTrue(is_active(datetime(2026, month, 15, 14 - offset, tzinfo=timezone.utc)))
-            self.assertTrue(is_active(datetime(2026, month, 15, 22 - offset, 59, tzinfo=timezone.utc)))
-            self.assertFalse(is_active(datetime(2026, month, 15, 23 - offset, tzinfo=timezone.utc)))
+    def test_default_window_follows_israel_local_time(self):
+        with TemporaryDirectory() as tmp:
+            config = RuntimeConfig(Path(tmp) / "config.json")
+            for month, offset in ((1, 2), (7, 3)):
+                self.assertFalse(config.monitoring_active(datetime(2026, month, 15, 13 - offset, 59, tzinfo=timezone.utc)))
+                self.assertTrue(config.monitoring_active(datetime(2026, month, 15, 14 - offset, tzinfo=timezone.utc)))
+                self.assertTrue(config.monitoring_active(datetime(2026, month, 15, 22 - offset, 59, tzinfo=timezone.utc)))
+                self.assertFalse(config.monitoring_active(datetime(2026, month, 15, 23 - offset, tzinfo=timezone.utc)))
 
     def test_uefa_nations_league_markets_are_included(self):
         with TemporaryDirectory() as tmp:
-            config = RuntimeConfig(Path(tmp) / "config.json", under_totals=True)
+            config = RuntimeConfig(Path(tmp) / "config.json")
             api = MarketAPI()
             league = "UEFA Nations League"
             api.events = [event(6.5, "nations-under", tags=[{"label": "Soccer"}, {"label": league}])]
@@ -149,7 +151,7 @@ class LiveUnderMonitorTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.json"
             config_path.write_text('{"active_leagues": ["Premier League"], "league_thresholds": {"Premier League": 0.1}}')
-            config = RuntimeConfig(config_path, under_totals=True)
+            config = RuntimeConfig(config_path)
             api = MarketAPI()
             sender = AsyncMock(return_value=True)
             history = Path(tmp) / "alerts.sqlite3"
@@ -165,11 +167,11 @@ class LiveUnderMonitorTests(unittest.TestCase):
             self.assertIn("Under 6.5", sender.await_args_list[1].args[0])
 
             config.set_under_threshold("Premier League", 7.5, 0.855)
-            reloaded = RuntimeConfig(config_path, under_totals=True)
+            reloaded = RuntimeConfig(config_path)
             self.assertEqual(reloaded.get_under_threshold("Premier League", 7.5), 0.855)
             self.assertEqual(reloaded.get_under_threshold("La Liga", 7.5), 0.85)
             self.assertEqual(reloaded.get_under_threshold("Premier League", 5.5), 0.80)
-            self.assertEqual(reloaded.get_threshold("Premier League"), 0.10)
+            self.assertNotIn("league_thresholds", config_path.read_text())
             with closing(sqlite3.connect(history)) as db:
                 asyncio.run(poll_once(api, reloaded, db, sender, ApiHealth(), NOW))
             self.assertEqual(sender.await_count, 3)
@@ -185,7 +187,7 @@ class LiveUnderMonitorTests(unittest.TestCase):
 
     def test_telegram_edits_the_selected_line_in_cents(self):
         with TemporaryDirectory() as tmp:
-            config = RuntimeConfig(Path(tmp) / "config.json", under_totals=True)
+            config = RuntimeConfig(Path(tmp) / "config.json")
             previous = bot_ui.config
             bot_ui.config = config
             try:
@@ -208,22 +210,22 @@ class LiveUnderMonitorTests(unittest.TestCase):
     def test_bulk_threshold_persists_all_leagues_and_preserves_other_lines(self):
         with TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.json"
-            config = RuntimeConfig(path, under_totals=True)
+            config = RuntimeConfig(path)
             config.set_under_threshold("La Liga", 5.5, 0.7)
             config.set_under_threshold("La Liga", 6.5, 0.6)
             self.assertTrue(config.set_under_threshold_all_leagues(5.5, 0.82))
-            reloaded = RuntimeConfig(path, under_totals=True)
+            reloaded = RuntimeConfig(path)
             for league in SUPPORTED_LEAGUES:
                 self.assertEqual(reloaded.get_under_threshold(league, 5.5), 0.82)
             self.assertEqual(reloaded.get_under_threshold("La Liga", 6.5), 0.6)
             with patch.object(config, "save", return_value=False):
                 self.assertFalse(config.set_under_threshold_all_leagues(5.5, 0.9))
             self.assertEqual(config.get_under_threshold("La Liga", 5.5), 0.82)
-            self.assertEqual(RuntimeConfig(path, under_totals=True).get_under_threshold("La Liga", 5.5), 0.82)
+            self.assertEqual(RuntimeConfig(path).get_under_threshold("La Liga", 5.5), 0.82)
 
     def test_telegram_bulk_threshold_flow(self):
         with TemporaryDirectory() as tmp:
-            config = RuntimeConfig(Path(tmp) / "config.json", under_totals=True)
+            config = RuntimeConfig(Path(tmp) / "config.json")
             previous = bot_ui.config
             bot_ui.config = config
             try:
@@ -242,7 +244,7 @@ class LiveUnderMonitorTests(unittest.TestCase):
 
     def test_only_confirmed_telegram_rejections_retry(self):
         with TemporaryDirectory() as tmp, closing(sqlite3.connect(":memory:")) as db:
-            config = RuntimeConfig(Path(tmp) / "config.json", under_totals=True)
+            config = RuntimeConfig(Path(tmp) / "config.json")
             api = MarketAPI()
             sender = AsyncMock(side_effect=[False, None, True])
             prepare_alert_history(db)

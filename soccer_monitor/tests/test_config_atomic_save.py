@@ -1,84 +1,72 @@
-"""
-Regression test: config_state.json was written in place with a plain open(..., 'w'),
-so a crash between truncation and the final byte left a half-written file. load() then
-failed to parse it, logged, and silently fell back to the default league list -- so a
-bad moment quietly changed which markets the daemon watches.
+"""Regression test: an interrupted config save must not corrupt config_state.json.
 
-The save is now written to a temporary file and renamed over the target, which is
-atomic, so an interrupted save leaves the previous config intact.
-
-Run: python tests/test_config_atomic_save.py
+config_state.json was once written in place, so a crash between truncation and the
+final byte left a half-written file. load() then failed to parse it and silently fell
+back to the default league list. The save now writes a temporary file and renames it
+over the target, which is atomic.
 """
 import json
 import logging
 import os
-import sys
 import tempfile
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import unittest
+from pathlib import Path
 
 from config_manager import RuntimeConfig
 
-logging.basicConfig(level=logging.CRITICAL)
 
+class AtomicSaveTests(unittest.TestCase):
+    def setUp(self):
+        logging.disable(logging.CRITICAL)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.tmp.name, "config_state.json")
+        self.config = RuntimeConfig(self.path)
 
-def load_config(path):
-    cfg = RuntimeConfig.__new__(RuntimeConfig)
-    cfg.filepath = path
-    cfg.global_threshold = 0.10
-    cfg.active_leagues = ["Premier League"]
-    cfg.league_thresholds = {}
-    return cfg
+    def tearDown(self):
+        logging.disable(logging.NOTSET)
+        self.tmp.cleanup()
 
-
-def test_a_failed_save_leaves_the_previous_file_intact():
-    with tempfile.TemporaryDirectory() as tmp:
-        path = os.path.join(tmp, "config_state.json")
-
-        cfg = load_config(path)
-        cfg.active_leagues = ["Premier League", "La Liga"]
-        cfg.save()
-
-        good = open(path).read()
-        assert json.loads(good)["active_leagues"] == ["Premier League", "La Liga"]
+    def test_a_failed_save_leaves_the_previous_file_intact(self):
+        self.config.active_leagues = ["Premier League", "La Liga"]
+        self.assertTrue(self.config.save())
+        good = Path(self.path).read_text()
 
         # A value json.dump cannot serialise: it raises partway through writing.
-        cfg.league_thresholds = {"Premier League": {1, 2, 3}}
-        cfg.save()  # must swallow the error, having changed nothing
+        self.config.under_thresholds = {"Premier League": {1, 2, 3}}
+        self.assertFalse(self.config.save())
 
-        assert open(path).read() == good, "the previous config must survive a failed save"
-        assert json.loads(open(path).read())["active_leagues"] == [
-            "Premier League", "La Liga"]
+        self.assertEqual(Path(self.path).read_text(), good)
+        self.assertEqual(json.loads(good)["active_leagues"], ["Premier League", "La Liga"])
 
+    def test_no_temporary_files_are_left_behind(self):
+        self.config.under_thresholds = {"Premier League": {1, 2}}
+        self.config.save()  # fails
+        self.assertEqual(os.listdir(self.tmp.name), ["config_state.json"])
 
-def test_no_temporary_files_are_left_behind():
-    with tempfile.TemporaryDirectory() as tmp:
-        path = os.path.join(tmp, "config_state.json")
-        cfg = load_config(path)
+    def test_a_normal_save_round_trips(self):
+        self.config.set_under_threshold("Serie A", 5.5, 0.75)
+        self.config.set_daily_report(False)
+        reloaded = RuntimeConfig(self.path)
+        self.assertEqual(reloaded.get_under_threshold("Serie A", 5.5), 0.75)
+        self.assertFalse(reloaded.daily_report_enabled)
 
-        cfg.save()
-        cfg.league_thresholds = {"Premier League": {1, 2}}
-        cfg.save()  # fails
+    def test_daily_report_setting_rolls_back_when_saving_fails(self):
+        self.config.save = lambda: False
+        self.assertFalse(self.config.set_daily_report(False))
+        self.assertTrue(self.config.daily_report_enabled)
 
-        leftovers = [n for n in os.listdir(tmp) if n != "config_state.json"]
-        assert leftovers == [], f"left temp files behind: {leftovers}"
-
-
-def test_a_normal_save_round_trips():
-    with tempfile.TemporaryDirectory() as tmp:
-        path = os.path.join(tmp, "config_state.json")
-        cfg = load_config(path)
-        cfg.global_threshold = 0.07
-        cfg.league_thresholds = {"Serie A": 0.05}
-        cfg.save()
-
-        data = json.load(open(path))
-        assert data["global_threshold"] == 0.07
-        assert data["league_thresholds"] == {"Serie A": 0.05}
+    def test_legacy_websocket_fields_are_dropped(self):
+        with open(self.path, "w") as f:
+            json.dump({"active_leagues": ["Serie A"], "global_threshold": 0.1,
+                       "league_thresholds": {"Serie A": 0.05}}, f)
+        config = RuntimeConfig(self.path)
+        self.assertEqual(config.active_leagues, ["Serie A"])
+        self.assertTrue(config.daily_report_enabled)
+        config.save()
+        data = json.loads(Path(self.path).read_text())
+        self.assertNotIn("global_threshold", data)
+        self.assertNotIn("league_thresholds", data)
 
 
 if __name__ == "__main__":
-    test_a_failed_save_leaves_the_previous_file_intact()
-    test_no_temporary_files_are_left_behind()
-    test_a_normal_save_round_trips()
-    print("OK: an interrupted save cannot corrupt config_state.json")
+    unittest.main()

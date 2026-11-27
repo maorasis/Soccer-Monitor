@@ -145,21 +145,17 @@ typing-inspection==0.4.4
     # via pydantic
 tzdata==2026.3
     # via
-    #   pandas
     #   football-under-monitor
+    #   pandas
     #   tzlocal
 tzlocal==5.4.4
     # via apscheduler
 urllib3==2.7.0
     # via requests
 websockets==16.1.1 ; python_full_version < '3.11'
-    # via
-    #   football-under-monitor
-    #   yfinance
+    # via yfinance
 websockets==17.1 ; python_full_version >= '3.11'
-    # via
-    #   football-under-monitor
-    #   yfinance
+    # via yfinance
 yarl==1.24.5
     # via aiohttp
 yfinance==1.7.0

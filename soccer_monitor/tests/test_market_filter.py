@@ -1,20 +1,16 @@
 """Check that only whole-game goal totals survive market filtering.
 
 Question strings are real, taken from the Gamma API on 2026-08-30.
-Run: python tests/test_market_filter.py
 """
-import os
-import sys
+import unittest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from soccer_monitor import parse_game_total_line
+from common import parse_game_total_line
 
 KEEP = {
     "Viking FK vs. Aalesunds FK: O/U 2.5": 2.5,
     "1. FC Cologne vs. Hertha BSC: O/U 3.5": 3.5,
     "Viking FK vs. Aalesunds FK: O/U 0.5": 0.5,
-    "Arsenal vs. Chelsea: O/U 1.5": 1.5,
+    "Arsenal vs. Chelsea: O/U 5.5": 5.5,
 }
 
 DROP = [
@@ -27,17 +23,18 @@ DROP = [
     "Will Zack Steffen win 2026 MLS Goalkeeper of the Year?",
 ]
 
-# Only 0.5 and 1.5 O/U are monitored
-ALLOWED_LINES = (0.5, 1.5)
+
+class MarketFilterTests(unittest.TestCase):
+    def test_whole_game_totals_are_parsed(self):
+        for question, line in KEEP.items():
+            with self.subTest(question=question):
+                self.assertEqual(parse_game_total_line(question), line)
+
+    def test_other_markets_are_dropped(self):
+        for question in DROP:
+            with self.subTest(question=question):
+                self.assertIsNone(parse_game_total_line(question))
+
 
 if __name__ == "__main__":
-    for q, line in KEEP.items():
-        assert parse_game_total_line(q) == line, q
-    for q in DROP:
-        assert parse_game_total_line(q) is None, q
-    
-    # Test line filter
-    monitored = [line for line in KEEP.values() if line in ALLOWED_LINES]
-    assert monitored == [0.5, 1.5], f"Expected [0.5, 1.5], got {monitored}"
-    
-    print(f"OK: {len(KEEP)} parsed, {len(DROP)} dropped, {len(monitored)} monitored")
+    unittest.main()

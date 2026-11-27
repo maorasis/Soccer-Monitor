@@ -1,8 +1,7 @@
-"""Telegram control panel shared by the websocket and live-Under daemons.
+"""Telegram control panel for the live Under monitor.
 
-Handlers use module-level objects initialized by start_bot_polling. Under-specific
-menus are enabled by RuntimeConfig.under_totals; edits use aiogram conversation
-state and authorization is enforced on both messages and callback queries.
+Handlers use module-level objects initialized by start_bot_polling. Edits use aiogram
+conversation state, and authorization is enforced on both messages and callback queries.
 """
 
 import logging
@@ -23,8 +22,6 @@ from config_manager import (
     MAX_ALERT_COOLDOWN_MINUTES,
     MIN_ALERT_COOLDOWN_MINUTES,
     SUPPORTED_LEAGUES,
-    UNDER_ACTIVE_END_HOUR,
-    UNDER_ACTIVE_START_HOUR,
     UNDER_DEFAULT_THRESHOLDS,
 )
 
@@ -32,18 +29,13 @@ logger = logging.getLogger("BotUI")
 
 router = Router()
 config: RuntimeConfig = None
-# Set by start_bot_polling, like config. Typed loosely because soccer_monitor imports
-# this module, so importing ApiHealth from it here would be circular.
+# Set by start_bot_polling, like config.
 health: Any = None
 allowed_chat_id: Optional[int] = None
 market_snapshot: Any = None
 test_sender: Any = None
 market_fetcher: Callable[[], Awaitable[dict]] | None = None
 rearm_alert: Callable[[str, datetime], int | None] | None = None
-
-# Price thresholds on Polymarket are between 0 and 1
-THRESHOLD_MIN = 0.01
-THRESHOLD_MAX = 1.0
 
 
 class AuthMiddleware(BaseMiddleware):
@@ -69,26 +61,23 @@ class AuthMiddleware(BaseMiddleware):
 
 class BotStates(StatesGroup):
     """Input awaited after an authorized user selects a menu action."""
-    waiting_for_global_threshold = State()
-    waiting_for_league_threshold = State()
     waiting_for_under_threshold = State()
     waiting_for_schedule = State()
     waiting_for_alert_cooldown = State()
 
 def get_main_menu_kb():
+    report = "On" if config.daily_report_enabled else "Off"
     buttons = [
         [InlineKeyboardButton(text="📊 Status", callback_data="menu_status")],
         [InlineKeyboardButton(text="⚙️ Edit Thresholds", callback_data="menu_thresholds")],
         [InlineKeyboardButton(text="🏆 Manage Leagues", callback_data="menu_leagues")],
+        [InlineKeyboardButton(text="📋 View Thresholds", callback_data="view_thresholds:0")],
+        [InlineKeyboardButton(text="⚽ Live Markets", callback_data="live_markets:0")],
+        [InlineKeyboardButton(text="🕒 Monitoring Schedule", callback_data="menu_schedule")],
+        [InlineKeyboardButton(text=f"🔁 Alert Cooldown · {config.alert_cooldown_minutes} min", callback_data="edit_alert_cooldown")],
+        [InlineKeyboardButton(text=f"🗓 Daily Report · {report}", callback_data="toggle_daily_report")],
+        [InlineKeyboardButton(text="🔔 Send Test Notification", callback_data="test_notification")],
     ]
-    if config and config.under_totals:
-        buttons.extend([
-            [InlineKeyboardButton(text="📋 View Thresholds", callback_data="view_thresholds:0")],
-            [InlineKeyboardButton(text="⚽ Live Markets", callback_data="live_markets:0")],
-            [InlineKeyboardButton(text="🕒 Monitoring Schedule", callback_data="menu_schedule")],
-            [InlineKeyboardButton(text=f"🔁 Alert Cooldown · {config.alert_cooldown_minutes} min", callback_data="edit_alert_cooldown")],
-            [InlineKeyboardButton(text="🔔 Send Test Notification", callback_data="test_notification")],
-        ])
     buttons.append([InlineKeyboardButton(text="❌ Close", callback_data="menu_close")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -103,32 +92,12 @@ def paged_kb(prefix, page, count, page_size):
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def get_thresholds_menu_kb():
-    if config.under_totals:
-        buttons = [
-            [InlineKeyboardButton(text=f"{data['flag']} {league}", callback_data=f"under_league:{league}")]
-            for league, data in SUPPORTED_LEAGUES.items()
-        ]
-        buttons.append([InlineKeyboardButton(text="🌍 All leagues", callback_data="under_all")])
-        buttons.append([InlineKeyboardButton(text="⬅️ Back", callback_data="menu_main")])
-        return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-    buttons = []
-    
-    # Global
-    buttons.append([InlineKeyboardButton(text=f"🌍 Global Threshold: {config.global_threshold:.3f}", callback_data="edit_global_threshold")])
-    
-    # Leagues
-    for league in config.active_leagues:
-        t = config.league_thresholds.get(league)
-        flag = SUPPORTED_LEAGUES.get(league, {}).get("flag", "")
-        disp_name = f"{league} {flag}".strip()
-        text = f"{disp_name}: {t:.3f}" if t is not None else f"{disp_name}: Default"
-        buttons.append([
-            InlineKeyboardButton(text=f"{text}", callback_data=f"edit_thresh_{league}"),
-            InlineKeyboardButton(text="🗑 Reset", callback_data=f"reset_thresh_{league}")
-        ])
-        
-    buttons.append([InlineKeyboardButton(text="⬅️ Back to Main Menu", callback_data="menu_main")])
+    buttons = [
+        [InlineKeyboardButton(text=f"{data['flag']} {league}", callback_data=f"under_league:{league}")]
+        for league, data in SUPPORTED_LEAGUES.items()
+    ]
+    buttons.append([InlineKeyboardButton(text="🌍 All leagues", callback_data="under_all")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Back", callback_data="menu_main")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def get_under_lines_kb(league: str):
@@ -161,13 +130,6 @@ def get_leagues_menu_kb():
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-def validate_threshold(value: float) -> str:
-    """Returns an error message if the threshold is invalid, or empty string if valid."""
-    if value < THRESHOLD_MIN or value > THRESHOLD_MAX:
-        return f"Threshold must be between {THRESHOLD_MIN} and {THRESHOLD_MAX}. Please try again, or /cancel."
-    return ""
-
-
 @router.message(Command("menu", "start"))
 async def cmd_menu(message: Message, state: FSMContext):
     await state.clear()
@@ -196,16 +158,14 @@ async def cb_menu_close(callback: CallbackQuery, state: FSMContext):
 async def cb_menu_status(callback: CallbackQuery):
     active_cnt = len(config.active_leagues)
     text = f"📊 *Status*\n\nActive Leagues: {active_cnt}\n"
-    if config.under_totals:
-        defaults = ", ".join(f"Under {line}: {price * 100:g}¢" for line, price in UNDER_DEFAULT_THRESHOLDS.items())
-        overrides = sum(len(prices) for prices in config.under_thresholds.values())
-        hours = f"{config.monitor_start}–{config.monitor_end} ({config.monitor_timezone})"
-        text += f"Polling: every 15 seconds, {hours}\nDefault limits: {defaults}\nCustom limits: {overrides}"
-    else:
-        text += f"Global Threshold: {config.global_threshold:.3f}\nCustom Thresholds: {len(config.league_thresholds)}"
+    defaults = ", ".join(f"Under {line}: {price * 100:g}¢" for line, price in UNDER_DEFAULT_THRESHOLDS.items())
+    overrides = sum(len(prices) for prices in config.under_thresholds.values())
+    hours = f"{config.monitor_start}–{config.monitor_end} ({config.monitor_timezone})"
+    report = "on" if config.daily_report_enabled else "off"
+    text += (f"Polling: every 15 seconds, {hours}\nDefault limits: {defaults}\nCustom limits: {overrides}\n"
+             f"Daily report: {report}")
     if health is not None:
-        # Recorded from calls the daemon already makes — opening this menu costs no
-        # API call of its own, which matters for API-Football's 100/day.
+        # Recorded from calls the daemon already makes; opening this menu probes nothing.
         text += "\n\n🔌 *API Health*\n" + "\n".join(health.status_lines())
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Back", callback_data="menu_main")]])
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
@@ -213,9 +173,6 @@ async def cb_menu_status(callback: CallbackQuery):
 
 @router.callback_query(F.data.regexp(r"^view_thresholds:\d+$"))
 async def cb_view_thresholds(callback: CallbackQuery):
-    if not config.under_totals:
-        await callback.answer("Open /menu to refresh.")
-        return
     leagues = list(SUPPORTED_LEAGUES)
     size = 5
     page = min(int(callback.data.split(":")[1]), (len(leagues) - 1) // size)
@@ -233,9 +190,6 @@ async def cb_view_thresholds(callback: CallbackQuery):
 @router.callback_query(F.data.regexp(r"^live_markets:\d+$"))
 async def cb_live_markets(callback: CallbackQuery):
     """Fetch and render current markets whenever the view is opened or paged."""
-    if not config.under_totals:
-        await callback.answer("Open /menu to refresh.")
-        return
     await callback.answer()
     try:
         if market_fetcher is None:
@@ -283,9 +237,6 @@ async def cb_rearm_alert(callback: CallbackQuery):
 
 @router.callback_query(F.data == "edit_alert_cooldown")
 async def cb_edit_alert_cooldown(callback: CallbackQuery, state: FSMContext):
-    if not config.under_totals:
-        await callback.answer("Open /menu to refresh.")
-        return
     await state.set_state(BotStates.waiting_for_alert_cooldown)
     await callback.message.edit_text(
         f"Alert cooldown is currently {config.alert_cooldown_minutes} minutes.\n"
@@ -324,18 +275,12 @@ def schedule_text():
 
 @router.callback_query(F.data == "menu_schedule")
 async def cb_schedule(callback: CallbackQuery):
-    if not config.under_totals:
-        await callback.answer("Open /menu to refresh.")
-        return
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✏️ Change schedule", callback_data="edit_schedule")], [InlineKeyboardButton(text="🏠 Main menu", callback_data="menu_main")]])
     await callback.message.edit_text(schedule_text(), reply_markup=kb)
     await callback.answer()
 
 @router.callback_query(F.data == "edit_schedule")
 async def cb_edit_schedule(callback: CallbackQuery, state: FSMContext):
-    if not config.under_totals:
-        await callback.answer("Open /menu to refresh.")
-        return
     await state.set_state(BotStates.waiting_for_schedule)
     await callback.message.edit_text("Send start, end and timezone on one line.\nExample: 14:00 23:00 Asia/Jerusalem\nUse 24-hour times and an IANA timezone such as Europe/London. Overnight windows are supported. Type /cancel to stop.")
     await callback.answer()
@@ -360,32 +305,38 @@ async def process_schedule(message: Message, state: FSMContext):
 @router.callback_query(F.data == "test_notification")
 async def cb_test_notification(callback: CallbackQuery):
     """Exercise the configured alert sender without claiming a market alert."""
-    if not config.under_totals or test_sender is None:
+    if test_sender is None:
         await callback.answer("Test notification is unavailable.", show_alert=True)
         return
     result = await test_sender("🔔 <b>Test notification</b>\nYour Soccer Monitor notification channel is working.")
     status = "Test notification sent." if result is True else ("Delivery was uncertain. Check your messages." if result is None else "Test notification failed. Check Telegram settings and status.")
     await callback.answer(status, show_alert=True)
 
+@router.callback_query(F.data == "toggle_daily_report")
+async def cb_toggle_daily_report(callback: CallbackQuery):
+    """Switch the daily alert report on or off and persist the choice."""
+    enabled = not config.daily_report_enabled
+    if not config.set_daily_report(enabled):
+        await callback.answer("Could not save the setting. Try again.", show_alert=True)
+        return
+    await callback.message.edit_reply_markup(reply_markup=get_main_menu_kb())
+    if enabled:
+        await callback.answer("Daily report on. It is sent only on days with alerts.", show_alert=True)
+    else:
+        await callback.answer("Daily report off. Alerts are still recorded.", show_alert=True)
+
 @router.callback_query(F.data == "menu_thresholds")
 async def cb_menu_thresholds(callback: CallbackQuery):
-    prompt = "Choose a league or all leagues." if config.under_totals else "Select a threshold to modify:"
-    await callback.message.edit_text(f"⚙️ *Edit Thresholds*\n{prompt}", reply_markup=get_thresholds_menu_kb(), parse_mode="Markdown")
+    await callback.message.edit_text("⚙️ *Edit Thresholds*\nChoose a league or all leagues.", reply_markup=get_thresholds_menu_kb(), parse_mode="Markdown")
     await callback.answer()
 
 @router.callback_query(F.data == "under_all")
 async def cb_under_all(callback: CallbackQuery):
-    if not config.under_totals:
-        await callback.answer("Open /menu to refresh.")
-        return
     await callback.message.edit_text("All supported leagues, including disabled leagues.\nChoose a full-game Under line.", reply_markup=get_under_all_lines_kb())
     await callback.answer()
 
 @router.callback_query(F.data.regexp(r"^under_all_edit:(5\.5|6\.5|7\.5)$"))
 async def cb_under_all_edit(callback: CallbackQuery, state: FSMContext):
-    if not config.under_totals:
-        await callback.answer("Open /menu to refresh.")
-        return
     line_text = callback.data.split(":", 1)[1]
     await state.update_data(target_league=None, target_under_line=float(line_text))
     await state.set_state(BotStates.waiting_for_under_threshold)
@@ -397,7 +348,7 @@ async def cb_under_all_edit(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data.startswith("under_league:"))
 async def cb_under_league(callback: CallbackQuery):
     league = callback.data.split(":", 1)[1]
-    if not config.under_totals or league not in SUPPORTED_LEAGUES:
+    if league not in SUPPORTED_LEAGUES:
         await callback.answer("Open /menu to refresh.")
         return
     await callback.message.edit_text(f"{league}\nChoose a full-game Under line.", reply_markup=get_under_lines_kb(league))
@@ -406,7 +357,7 @@ async def cb_under_league(callback: CallbackQuery):
 @router.callback_query(F.data.regexp(r"^under_edit:(5\.5|6\.5|7\.5):"))
 async def cb_under_edit(callback: CallbackQuery, state: FSMContext):
     _, line_text, league = callback.data.split(":", 2)
-    if not config.under_totals or league not in SUPPORTED_LEAGUES:
+    if league not in SUPPORTED_LEAGUES:
         await callback.answer("Open /menu to refresh.")
         return
     await state.update_data(target_league=league, target_under_line=float(line_text))
@@ -465,97 +416,6 @@ async def cb_toggle_league(callback: CallbackQuery):
     disp_name = f"{league} {flag}".strip()
     await callback.answer(f"Toggled {disp_name}")
 
-@router.callback_query(F.data.regexp(r"^(edit_global_threshold$|edit_thresh_|reset_thresh_)"),
-                       lambda _: config.under_totals)
-async def cb_old_threshold_menu(callback: CallbackQuery):
-    await callback.answer("Open /menu to refresh.")
-
-@router.callback_query(F.data == "edit_global_threshold")
-async def cb_edit_global_threshold(callback: CallbackQuery, state: FSMContext):
-    await callback.message.edit_text(
-        f"Enter the new global threshold ({THRESHOLD_MIN}–{THRESHOLD_MAX}).\nType /cancel to abort.",
-        reply_markup=None
-    )
-    await state.set_state(BotStates.waiting_for_global_threshold)
-    await callback.answer()
-
-@router.callback_query(F.data.startswith("edit_thresh_"))
-async def cb_edit_league_threshold(callback: CallbackQuery, state: FSMContext):
-    league = callback.data.replace("edit_thresh_", "")
-    await state.update_data(target_league=league)
-    flag = SUPPORTED_LEAGUES.get(league, {}).get("flag", "")
-    disp_name = f"{league} {flag}".strip()
-    await callback.message.edit_text(
-        f"Enter the new threshold for {disp_name} ({THRESHOLD_MIN}–{THRESHOLD_MAX}).\nType /cancel to abort.",
-        reply_markup=None
-    )
-    await state.set_state(BotStates.waiting_for_league_threshold)
-    await callback.answer()
-
-@router.callback_query(F.data.startswith("reset_thresh_"))
-async def cb_reset_league_threshold(callback: CallbackQuery):
-    league = callback.data.replace("reset_thresh_", "")
-    config.remove_league_threshold(league)
-    try:
-        await callback.message.edit_reply_markup(reply_markup=get_thresholds_menu_kb())
-    except TelegramBadRequest:
-        pass
-    flag = SUPPORTED_LEAGUES.get(league, {}).get("flag", "")
-    disp_name = f"{league} {flag}".strip()
-    await callback.answer(f"Reset {disp_name} threshold to default.")
-
-@router.message(BotStates.waiting_for_global_threshold)
-async def process_global_threshold(message: Message, state: FSMContext):
-    logger.info(f"process_global_threshold triggered, text={message.text!r}")
-    if not message.text:
-        await message.answer("Please send a number, or /cancel.")
-        return
-    try:
-        val = float(message.text.strip())
-        error = validate_threshold(val)
-        if error:
-            await message.answer(error)
-            return
-        config.set_global_threshold(val)
-        await state.clear()
-        await message.answer("✅ Global threshold updated.", reply_markup=get_thresholds_menu_kb())
-    except ValueError:
-        await message.answer("Invalid number. Please try again, or /cancel.")
-    except Exception as e:
-        logger.error(f"Error in process_global_threshold: {e}", exc_info=True)
-        await message.answer(f"Unexpected error: {e}")
-
-@router.message(BotStates.waiting_for_league_threshold)
-async def process_league_threshold(message: Message, state: FSMContext):
-    logger.info(f"process_league_threshold triggered, text={message.text!r}")
-    if not message.text:
-        await message.answer("Please send a number, or /cancel.")
-        return
-    try:
-        val = float(message.text.strip())
-        error = validate_threshold(val)
-        if error:
-            await message.answer(error)
-            return
-        data = await state.get_data()
-        league = data.get("target_league")
-        logger.info(f"Setting threshold for league={league!r} to {val}")
-        if league:
-            config.set_league_threshold(league, val)
-            await state.clear()
-            flag = SUPPORTED_LEAGUES.get(league, {}).get("flag", "")
-            disp_name = f"{league} {flag}".strip()
-            await message.answer(f"✅ {disp_name} threshold updated to {val:.3f}.", reply_markup=get_thresholds_menu_kb())
-        else:
-            await state.clear()
-            await message.answer("Error: League not found. Type /menu to restart.")
-    except ValueError:
-        await message.answer("Invalid number. Please try again, or /cancel.")
-    except Exception as e:
-        logger.error(f"Error in process_league_threshold: {e}", exc_info=True)
-        await message.answer(f"Unexpected error: {e}")
-
-
 @router.message()
 async def catch_all_message(message: Message, state: FSMContext):
     """Debug: catches any message that didn't match another handler."""
@@ -613,7 +473,7 @@ async def start_bot_polling(bot_token: str, runtime_config: RuntimeConfig,
         # handle_signals defaults to True, which makes aiogram install its own SIGTERM
         # handler -- replacing Python's default "terminate on SIGTERM". It stopped
         # polling and returned, but nothing cancelled the daemon's other loops, so
-        # soccer_monitor hung until systemd SIGKILLed it 90s later on every restart.
+        # the daemon hung until systemd SIGKILLed it 90s later on every restart.
         # main() owns the signal now and cancels everything.
         await dp.start_polling(bot, handle_signals=False)
     finally:

@@ -32,6 +32,8 @@ Tap **Manage Leagues**. Each supported league shows a ✅ when enabled or ❌ wh
 
 **Example:** Leave Premier League enabled and tap La Liga to disable it. The bot will continue checking Premier League markets, while La Liga markets are excluded. ✅
 
+Supported leagues include Portugal's **Primeira Liga** 🇵🇹 and the Dutch **Eredivisie** 🇳🇱. If your bot was set up before they were added, they start disabled; tap them to enable them.
+
 The bot checks markets in enabled leagues only. Turning a league off does not erase its saved thresholds, so they can be used again when you re-enable it.
 
 ## 🎯 Change an alert limit
@@ -86,77 +88,88 @@ To change it:
 
 Use 24-hour times and an IANA timezone name, such as `Europe/London`. Start and end must differ. Overnight windows such as `22:00 02:00 Asia/Jerusalem` are supported.
 
+## 🗓 Daily report
+
+On days when the bot sent at least one alert, it sends a summary the next morning at **09:00** in your monitoring timezone. For each alert it shows the time, match, line, alerted ask, and whether the Under **won ✅, lost ❌ or is still pending ⏳**. It also totals the result as if one share had been bought at each alerted ask: a win earns 100¢ minus the ask, a loss costs the ask. No report is sent for a day without alerts.
+
+**Example:** You received an Under 5.5 alert at 80¢ that won and an Under 6.5 alert at 85¢ that lost. The report shows +20¢ and −85¢, a total of −65¢ on 165¢. 🗓
+
+Tap **Daily Report** in `/menu` to switch it **Off** or back **On**; the button shows the current state. Alerts are still recorded while it is off. A report missed while it was off is not sent later, except that switching it back on the same day still sends the previous day's report.
+
 ## 🔔 Check status and test delivery
 
-- **Status** shows the active league count, schedule, default limits, custom-limit count, and recorded API health.
+- **Status** shows the active league count, schedule, default limits, custom-limit count, whether the daily report is on, and recorded API health.
 - **Send Test Notification** sends a labeled test message using the alert channel. It does not count as a market alert. The bot reports whether sending succeeded, failed, or was uncertain.
 
 If alerts are missing, check that the server is running, your league is enabled, the schedule is active, and an eligible market has an ask at or below its limit. Check **Live Markets**, its timestamp, and **Status**; the same market may already have alerted. Use the test notification to check delivery.
 
 ## System overview
 
-Verified against the working tree on 2026-11-22.
+Verified against the working tree on 2026-11-27.
 
-The repository contains separate Python entry points, not one combined daemon:
+The soccer folder has one daemon, [`live_under_monitor.py`](https://github.com/maorasis/Soccer-Monitor/blob/main/soccer_monitor/live_under_monitor.py).
+It polls live full-game Under markets, compares asks with per-league limits, sends
+alerts, and sends a daily report. External systems: Polymarket Gamma and CLOB HTTP
+APIs, and Telegram.
 
-| Entry point | Responsibility | External systems |
-|---|---|---|
-| [`live_under_monitor.py`](https://github.com/maorasis/Soccer-Monitor/blob/main/soccer_monitor/live_under_monitor.py) | Poll live full-game Under markets, compare asks with per-league limits, and send alerts. | Polymarket Gamma and CLOB HTTP APIs; Telegram |
-| [`soccer_monitor.py`](https://github.com/maorasis/Soccer-Monitor/blob/main/soccer_monitor/soccer_monitor.py) | Discover soccer markets and detect downward ask crossings from websocket books. | API-Football, Polymarket Gamma and CLOB websocket, Telegram |
+| Module | Responsibility |
+|---|---|
+| [`live_under_monitor.py`](https://github.com/maorasis/Soccer-Monitor/blob/main/soccer_monitor/live_under_monitor.py) | Market discovery, order-book polling, alert claims and rearms, and `main`. |
+| [`daily_report.py`](https://github.com/maorasis/Soccer-Monitor/blob/main/soccer_monitor/daily_report.py) | Alert log, outcome lookups and the once-a-day report. |
+| [`bot_ui.py`](https://github.com/maorasis/Soccer-Monitor/blob/main/soccer_monitor/bot_ui.py) | Telegram control panel. |
+| [`config_manager.py`](https://github.com/maorasis/Soccer-Monitor/blob/main/soccer_monitor/config_manager.py) | Supported leagues and persisted settings. |
+| [`common.py`](https://github.com/maorasis/Soccer-Monitor/blob/main/soccer_monitor/common.py) | Telegram delivery, API health, error alerts and market-title parsing. |
 
-The two soccer implementations share [`bot_ui.py`](https://github.com/maorasis/Soccer-Monitor/blob/main/soccer_monitor/bot_ui.py),
-[`config_manager.py`](https://github.com/maorasis/Soccer-Monitor/blob/main/soccer_monitor/config_manager.py), and health, error, title parsing and
-Telegram helpers in `soccer_monitor.py`. `RuntimeConfig(under_totals=True)` selects
-the live-Under control-panel behavior. See the technical sections below.
+An earlier websocket-based monitor (`soccer_monitor.py`, with API-Football and team
+name mapping) was removed on 2026-11-27. It remains in the Git history.
 
 ### Configuration and state
 
 - `RuntimeConfig` loads `config_state.json` by default and saves by writing a
-  temporary file and replacing the original. Its active league list, legacy
-  global/league thresholds, per-league Under limits, alert cooldown, and polling schedule are
-  held in memory. The Under limit and schedule setters restore their previous
-  in-memory values if saving fails. The file is not watched for external edits.
+  temporary file and replacing the original. Its active league list, per-league
+  Under limits, alert cooldown, polling schedule and daily report switch are held in
+  memory. Setters restore their previous in-memory values if saving fails. The file
+  is not watched for external edits. Fields left by the removed websocket monitor
+  (`global_threshold`, `league_thresholds`) are ignored and dropped on the next save.
   Source: [`config_manager.py`](https://github.com/maorasis/Soccer-Monitor/blob/main/soccer_monitor/config_manager.py), `RuntimeConfig`.
-- The live-Under daemon records claimed token IDs and scheduled rearms in `live_under_alerts.sqlite3`
-  beside the config file. The websocket daemon tracks token alerts in memory and
-  clears that history on the Israel-local date change. Their alert behavior is
-  different; see the technical sections below.
-- The websocket daemon loads `team_mapping.json` to match Polymarket names to
-  API-Football names. The mapper script can update it. Sources: `MarketDiscovery.load_team_mapping`,
-  `scripts/team_mapper.py:save_mapping`.
-- Environment variables are loaded with `python-dotenv`; see the constants at
-  the top of the respective entry point. Do not commit credentials. The soccer
-  processes use `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`; the websocket daemon
-  also uses `API_FOOTBALL_KEY`.
+- `live_under_alerts.sqlite3`, beside the config file, holds claimed token IDs,
+  scheduled rearms, the alert log and the days whose report was sent.
+- Environment variables are loaded with `python-dotenv` from `soccer_monitor/.env`
+  by [`common.py`](https://github.com/maorasis/Soccer-Monitor/blob/main/soccer_monitor/common.py). Already-set variables take precedence. Do not commit
+  credentials. The daemon requires `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`.
 
 The config save is atomic for a single replacement, but there is no inter-process
-locking or automatic reload in `RuntimeConfig`. Running both soccer daemons with
-the same config path can therefore lead to stale in-memory settings and overwritten
-changes. The same Telegram bot token also cannot safely be assumed to support
-independent simultaneous polling consumers.
+locking or automatic reload. Do not run two daemons with the same config path or bot
+token.
 
 ### Execution and deployment
 
 Dependencies and Python compatibility are declared in [pyproject.toml](https://github.com/maorasis/Soccer-Monitor/blob/main/pyproject.toml),
 with resolved versions in [uv.lock](https://github.com/maorasis/Soccer-Monitor/blob/main/uv.lock). The checked-in
-[`soccer_monitor.service`](https://github.com/maorasis/Soccer-Monitor/blob/main/soccer_monitor/soccer_monitor.service) starts the live-Under entry
-point. See the [deployment guide](https://github.com/maorasis/Soccer-Monitor/blob/main/soccer_monitor/oracle_daemon_guide.md) for the checked-in
-operational instructions. Actual deployed versions and process topology are unknown.
+[`soccer_monitor.service`](https://github.com/maorasis/Soccer-Monitor/blob/main/soccer_monitor/soccer_monitor.service) starts the daemon. See the
+[deployment guide](https://github.com/maorasis/Soccer-Monitor/blob/main/soccer_monitor/oracle_daemon_guide.md) for operational instructions.
 
-Tests are a mixture of `unittest` classes and standalone Python scripts under
-[`tests/`](https://github.com/maorasis/Soccer-Monitor/tree/main/soccer_monitor/tests/). Some scripts perform real network calls or send messages;
-read their module docstrings and setup before running them. In particular,
-`test_threshold_alert.py` explicitly sends a real Telegram message.
+### Tests
 
-## Soccer monitor internals
+All tests are `unittest` classes under [`tests/`](https://github.com/maorasis/Soccer-Monitor/tree/main/soccer_monitor/tests/) and run offline with
+simulated HTTP and Telegram boundaries. Run them from this folder:
 
-Verified against the working tree on 2026-11-22.
+```bash
+uv run python -m unittest
+```
+
+GitHub Actions runs the same command, and the Reem test suite, on every push and pull
+request; see [`.github/workflows/tests.yml`](https://github.com/maorasis/Soccer-Monitor/blob/main/.github/workflows/tests.yml).
+
+## Live monitor internals
+
+Verified against the working tree on 2026-11-27.
 
 ### Live Under polling
 
 [`live_under_monitor.py`](https://github.com/maorasis/Soccer-Monitor/blob/main/soccer_monitor/live_under_monitor.py) composes `RuntimeConfig`, a
 shared HTTP session, SQLite alert history, `ApiHealth`, error delivery, and the
-Telegram panel in `main`. `run_polls` checks the saved schedule at 15-second
+Telegram panel in `main`, and runs the daily report task beside the poll loop. `run_polls` checks the saved schedule at 15-second
 boundaries. The daily start and end are interpreted in the configured IANA time
 zone, with an end earlier than the start representing an overnight window.
 
@@ -167,37 +180,40 @@ supported Under lines. `poll_once` fetches CLOB books in batches of 100 tokens;
 `RuntimeConfig.get_under_threshold` (default or league override). The first observed
 ask at or below that limit qualifies, even if the first observation is already low.
 
-Before sending, `poll_once` inserts the token into the SQLite `alerted` table. A
-successful send keeps the claim; an explicit failure removes it for a later retry;
-an uncertain result keeps it. This favors duplicate avoidance when delivery is
-ambiguous, but a crash or ambiguous failure can mean the alert is never delivered.
-The persisted key is the token ID, with no daily expiration in this implementation.
+Before sending, poll_once claims the alert by token in SQLite and saves the
+new message's rearm button. Tapping it schedules one follow-up for that token
+after the delay printed on the button. A scheduled poll sends the follow-up
+if the market is still eligible and the ask meets the current limit. An explicit
+delivery failure releases the first claim or restores the pending rearm for
+retry. Uncertain delivery keeps the claim to avoid duplicate notifications.
+Delivered and uncertain alerts, including rearmed follow-ups, are added to the
+`alert_log` table for the daily report.
 
-Each alert carries a unique rearm button with the cooldown configured at send time. `schedule_rearm` records a deadline once per button in `alert_rearms`. On a scheduled poll after the deadline, `poll_once` sends a follow-up only if the market is still eligible and its current ask is at or below the current threshold. It rotates the button before sending; an explicit delivery failure restores the pending rearm, while uncertain delivery retains the claim. The next alert uses the then-current cooldown. SQLite preserves pending rearms across restarts. Sources: `live_under_monitor.py:prepare_alert_history`, `schedule_rearm`, `poll_once`; `config_manager.py:RuntimeConfig.set_alert_cooldown`.
+The Live Markets screen fetches eligible markets and order books each time it
+opens or changes page. It shows the fetch time and reads alert limits from the
+current configuration. Only enabled leagues with active games and valid asks at
+or below the league-and-line limit appear; missing asks and above-limit markets
+are hidden. A failed fetch shows an error.
 
-The Live Markets screen independently fetches eligible markets and books on every open or page change, regardless of the monitoring schedule. It displays only markets in enabled leagues with a valid ask at or below their current thresholds, shows the fetch time, and reports a fetch failure. This read does not send market alerts. Sources: `live_under_monitor.py:fetch_ui_markets`, `fetch_market_books`; `bot_ui.py:cb_live_markets`.
+### Daily report
 
-### Websocket price dips
+[`daily_report.py`](https://github.com/maorasis/Soccer-Monitor/blob/main/soccer_monitor/daily_report.py) checks once a minute. From 09:00 in the
+monitoring timezone it considers the previous local calendar day. It sends a report
+only if the report is switched on, at least one alert was logged that day, and that
+day's report has not been sent. Only the previous day is considered, so a report
+skipped while switched off is not sent days later.
 
-[`soccer_monitor.py`](https://github.com/maorasis/Soccer-Monitor/blob/main/soccer_monitor/soccer_monitor.py) composes `LiveMatchTracker`,
-`MarketDiscovery`, `OrderBookMonitor`, and `AlertEngine` in `main`. The tracker
-fetches fixtures for today and tomorrow, retains a global fixture cache, and
-filters it against enabled leagues on read. Discovery scans Gamma and matches
-fixtures using team mappings. When a discovery scan fails, `None` tells the caller
-to retain the current subscriptions instead of clearing them.
+Before sending, it looks up each unresolved alert at the CLOB market endpoint by the
+market's condition ID, which Gamma returns as `conditionId`. A token marked
+`winner` is a win; another token marked `winner` is a loss; no winner yet is pending.
+If a lookup fails, it retries each minute until 10:00, then sends with those alerts
+pending. Results assume one share bought at the alerted ask: a win earns `1 - ask`
+and a loss costs the ask. Pending alerts are excluded from the total.
 
-`OrderBookMonitor` applies full book snapshots and sell-side level changes. A
-token is armed only after its ask is seen at or above the configured threshold;
-an initial ask below the threshold does not itself count as a dip. A later ask
-below the threshold starts a confirmation task without blocking websocket reads.
-After the delay, an empty book or an ask at or below `ASK_PRICE_MIN` suppresses
-the alert. A score lookup can suppress a market whose Under outcome can no longer
-win. A confirmed dip is sent through `AlertEngine`; its per-token history is
-in memory and cleared when `main` observes a new Israel-local date.
-
-Book state is discarded on reconnect because updates may have been missed during
-the gap. `set_markets` reconnects when token IDs change, but metadata-only changes
-do not require a new subscription. Source: `OrderBookMonitor`.
+An explicit Telegram failure retries the report on the next check. A sent or
+uncertain report is recorded in `daily_reports` and not repeated. The menu's
+**Daily Report** button switches `RuntimeConfig.daily_report_enabled`; alerts are
+logged either way.
 
 ### Control panel and health
 
@@ -208,24 +224,25 @@ missing or invalid. Aiogram states hold pending threshold, schedule and alert co
 to dollar fractions and persisted by `RuntimeConfig`. Bulk edits write the chosen
 line for all supported leagues, including disabled ones.
 
-`ApiHealth` records results of calls the daemons already make; status display does
+`ApiHealth` records results of calls the daemon already makes; status display does
 not probe upstream services. `ErrorAlertHandler` queues eligible ERROR logs and
 applies a call-site cooldown. Telegram send errors are marked to avoid recursively
-reporting a Telegram failure through Telegram. Source: `soccer_monitor.py:ApiHealth`,
-`ErrorAlertHandler`, and `error_alert_loop`.
+reporting a Telegram failure through Telegram. Source: [`common.py`](https://github.com/maorasis/Soccer-Monitor/blob/main/soccer_monitor/common.py):
+`ApiHealth`, `ErrorAlertHandler`, `error_alert_loop` and `TelegramSender`.
 
 ## Soccer helper scripts
 
-Verified against the working tree on 2026-11-22.
+Verified against the working tree on 2026-11-27.
 
 | Script | Behavior and side effects |
 |---|---|
-| [`team_mapper.py`](https://github.com/maorasis/Soccer-Monitor/blob/main/soccer_monitor/scripts/team_mapper.py) | Fetches supported-league teams using the hard-coded 2024 API-Football season, extracts Polymarket names, automatically matches exact/normalized names, prompts for unresolved names, and writes `team_mapping.json` in the working directory. `fetch_polymarket_teams_sync` is an unimplemented stub. |
-| [`check_prefixes.py`](https://github.com/maorasis/Soccer-Monitor/blob/main/soccer_monitor/scripts/check_prefixes.py) | Reads `team_mapping.json` in the working directory and prints colon-prefixed keys that lack a standalone equivalent. |
 | [`fetch_and_plot_trades.py`](https://github.com/maorasis/Soccer-Monitor/blob/main/soccer_monitor/scripts/fetch_and_plot_trades.py) | Finds the configured Gamma market, fetches first-token price history and writes a CSV and plot in the working directory. Its `1 - price` second series is a calculated complement, not a separately fetched order book. |
 
-These scripts can call external services, and some write files or prompt for input.
-Inspect their constants and working directory before running them.
+The script calls external services and writes files. Inspect its constants and
+working directory before running it.
+
+The team-name mapping tools (`team_mapper.py`, `check_prefixes.py` and
+`team_mapping.json`) served only the removed websocket monitor and were removed with it.
 
 ## More information
 

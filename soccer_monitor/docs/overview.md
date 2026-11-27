@@ -1,55 +1,57 @@
 # Football_Under_Monitor system overview
 
-Verified against the working tree on 2026-11-22.
+Verified against the working tree on 2026-11-27.
 
-The soccer folder contains separate Python entry points, not one combined daemon:
+The soccer folder has one daemon, [`live_under_monitor.py`](../live_under_monitor.py).
+It polls live full-game Under markets, compares asks with per-league limits, sends
+alerts, and sends a daily report. External systems: Polymarket Gamma and CLOB HTTP
+APIs, and Telegram.
 
-| Entry point | Responsibility | External systems |
-|---|---|---|
-| [`live_under_monitor.py`](../live_under_monitor.py) | Poll live full-game Under markets, compare asks with per-league limits, and send alerts. | Polymarket Gamma and CLOB HTTP APIs; Telegram |
-| [`soccer_monitor.py`](../soccer_monitor.py) | Discover soccer markets and detect downward ask crossings from websocket books. | API-Football, Polymarket Gamma and CLOB websocket, Telegram |
+| Module | Responsibility |
+|---|---|
+| [`live_under_monitor.py`](../live_under_monitor.py) | Market discovery, order-book polling, alert claims and rearms, and `main`. |
+| [`daily_report.py`](../daily_report.py) | Alert log, outcome lookups and the once-a-day report. |
+| [`bot_ui.py`](../bot_ui.py) | Telegram control panel. |
+| [`config_manager.py`](../config_manager.py) | Supported leagues and persisted settings. |
+| [`common.py`](../common.py) | Telegram delivery, API health, error alerts and market-title parsing. |
 
-The two soccer implementations share [`bot_ui.py`](../bot_ui.py),
-[`config_manager.py`](../config_manager.py), and health, error, title parsing and
-Telegram helpers in `soccer_monitor.py`. `RuntimeConfig(under_totals=True)` selects
-the live-Under control-panel behavior. See [soccer monitors](soccer-monitors.md) and
-[helper scripts](stock-and-tools.md).
+An earlier websocket-based monitor (`soccer_monitor.py`, with API-Football and team
+name mapping) was removed on 2026-11-27. It remains in the Git history.
 
 ## Configuration and state
 
 - `RuntimeConfig` loads `config_state.json` by default and saves by writing a
-  temporary file and replacing the original. Its active league list, legacy
-  global/league thresholds, per-league Under limits, alert cooldown, and polling schedule are
-  held in memory. The Under limit and schedule setters restore their previous
-  in-memory values if saving fails. The file is not watched for external edits.
+  temporary file and replacing the original. Its active league list, per-league
+  Under limits, alert cooldown, polling schedule and daily report switch are held in
+  memory. Setters restore their previous in-memory values if saving fails. The file
+  is not watched for external edits. Fields left by the removed websocket monitor
+  (`global_threshold`, `league_thresholds`) are ignored and dropped on the next save.
   Source: [`config_manager.py`](../config_manager.py), `RuntimeConfig`.
-- The live-Under daemon records claimed token IDs and scheduled rearms in `live_under_alerts.sqlite3`
-  beside the config file. The websocket daemon tracks token alerts in memory and
-  clears that history on the Israel-local date change. Their alert behavior is
-  different; see [soccer monitors](soccer-monitors.md).
-- The websocket daemon loads `team_mapping.json` to match Polymarket names to
-  API-Football names. The mapper script can update it. Sources: `MarketDiscovery.load_team_mapping`,
-  `scripts/team_mapper.py:save_mapping`.
-- Environment variables are loaded with `python-dotenv`; see the constants at
-  the top of the respective entry point. Do not commit credentials. The soccer
-  processes use `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`; the websocket daemon
-  also uses `API_FOOTBALL_KEY`.
+- `live_under_alerts.sqlite3`, beside the config file, holds claimed token IDs,
+  scheduled rearms, the alert log and the days whose report was sent.
+- Environment variables are loaded with `python-dotenv` from `soccer_monitor/.env`
+  by [`common.py`](../common.py). Already-set variables take precedence. Do not commit
+  credentials. The daemon requires `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`.
 
 The config save is atomic for a single replacement, but there is no inter-process
-locking or automatic reload in `RuntimeConfig`. Running both soccer daemons with
-the same config path can therefore lead to stale in-memory settings and overwritten
-changes. The same Telegram bot token also cannot safely be assumed to support
-independent simultaneous polling consumers.
+locking or automatic reload. Do not run two daemons with the same config path or bot
+token.
 
 ## Execution and deployment
 
 Dependencies and Python compatibility are declared in [pyproject.toml](../../pyproject.toml),
 with resolved versions in [uv.lock](../../uv.lock). The checked-in
-[`soccer_monitor.service`](../soccer_monitor.service) starts the live-Under entry
-point. See the [deployment guide](../oracle_daemon_guide.md) for the checked-in
-operational instructions. Actual deployed versions and process topology are unknown.
+[`soccer_monitor.service`](../soccer_monitor.service) starts the daemon. See the
+[deployment guide](../oracle_daemon_guide.md) for operational instructions.
 
-Tests are a mixture of `unittest` classes and standalone Python scripts under
-[`tests/`](../tests/). Some scripts perform real network calls or send messages;
-read their module docstrings and setup before running them. In particular,
-`test_threshold_alert.py` explicitly sends a real Telegram message.
+## Tests
+
+All tests are `unittest` classes under [`tests/`](../tests/) and run offline with
+simulated HTTP and Telegram boundaries. Run them from this folder:
+
+```bash
+uv run python -m unittest
+```
+
+GitHub Actions runs the same command, and the Reem test suite, on every push and pull
+request; see [`.github/workflows/tests.yml`](../../.github/workflows/tests.yml).
